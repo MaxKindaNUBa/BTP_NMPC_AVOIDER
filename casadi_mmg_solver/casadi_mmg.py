@@ -1,3 +1,24 @@
+import os
+import ctypes
+
+# Set ACADOS_SOURCE_DIR programmatically
+os.environ["ACADOS_SOURCE_DIR"] = "/home/chandran/acados"
+
+# Pre-load acados shared libraries to bypass LD_LIBRARY_PATH requirement on Linux
+acados_lib_dir = "/home/chandran/acados/lib"
+if os.path.exists(acados_lib_dir):
+    try:
+        # Load in topological dependency order
+        mode = ctypes.RTLD_GLOBAL
+        ctypes.CDLL(os.path.join(acados_lib_dir, "libqdldl.so"), mode=mode)
+        ctypes.CDLL(os.path.join(acados_lib_dir, "libosqp.so"), mode=mode)
+        ctypes.CDLL(os.path.join(acados_lib_dir, "libqpOASES_e.so"), mode=mode)
+        ctypes.CDLL(os.path.join(acados_lib_dir, "libblasfeo.so"), mode=mode)
+        ctypes.CDLL(os.path.join(acados_lib_dir, "libhpipm.so"), mode=mode)
+        ctypes.CDLL(os.path.join(acados_lib_dir, "libacados.so"), mode=mode)
+    except Exception as e:
+        print(f"Warning: programmatically loading acados libraries failed: {e}")
+
 import casadi as ca
 import numpy as np
 
@@ -263,35 +284,142 @@ def make_casadi_integrator(h, method="rk4", smooth=True, scale=1000.0, sym_type=
 
     return ca.Function(f"{method}_step", [state, control], [nxt_state, r_dot_a], ["state", "control"], ["next_state", "r_dot_a"])
 
+def make_acados_integrator(h, smooth=True, scale=1000.0):
+    """
+    Creates an acados SimSolver for the MMG model using RK4 (explicit Runge-Kutta).
+
+    Parameters:
+    -----------
+    h : float
+        Integration time step (s)
+    smooth : bool, default True
+        If True, uses smooth tanh blending for continuous functions.
+    scale : float, default 1000.0
+        Steepness of the tanh transition.
+
+    Returns:
+    --------
+    integrator_fun : function
+        A function mapping (state, control) -> (next_state, r_dot_a)
+    """
+    import os
+    from acados_template import AcadosModel, AcadosSim, AcadosSimSolver
+
+    # Ensure environment variables are set
+    os.environ["ACADOS_SOURCE_DIR"] = "/home/chandran/acados"
+    os.environ["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH", "") + ":/home/chandran/acados/lib"
+
+    model = AcadosModel()
+    model.name = f"vessel_mmg_acados_{'smooth' if smooth else 'exact'}"
+
+    # States and controls
+    x = ca.SX.sym('x', 6)
+    u = ca.SX.sym('u', 2)
+
+    # Dynamics (explicit ODE)
+    f_expl = MMG_Time_Derivative_casadi(x, u, smooth=smooth, scale=scale)
+
+    model.f_expl_expr = f_expl
+    model.x = x
+    model.u = u
+
+    sim = AcadosSim()
+    sim.model = model
+
+    # Set RK4 options
+    sim.solver_options.T = h
+    sim.solver_options.integrator_type = 'ERK'
+    sim.solver_options.num_stages = 4
+    sim.solver_options.num_steps = 1
+
+    # Clean output directory config
+    sim.code_export_directory = os.path.abspath(f"c_generated_code_sim_{'smooth' if smooth else 'exact'}")
+
+    sim_solver = AcadosSimSolver(sim)
+
+    # CasADi function to evaluate derivatives (e.g. for r_dot_a)
+    f_expl_fun = ca.Function('f_expl_fun', [x, u], [f_expl])
+
+    def integrator_fun(state_in, control_in):
+        x0 = np.array(state_in).flatten()
+        u0 = np.array(control_in).flatten()
+
+        sim_solver.set("x", x0)
+        sim_solver.set("u", u0)
+        sim_solver.solve()
+
+        nxt_state = sim_solver.get("x")
+
+        # Evaluate derivative for r_dot_a (3rd element, i.e. r_dot)
+        dstate0 = f_expl_fun(x0, u0)
+        r_dot_a = float(dstate0[2])
+
+        return ca.DM(nxt_state), r_dot_a
+
+    return integrator_fun
 
 if __name__ == "__main__":
+    import os
     import matplotlib.pyplot as plt
 
+    # Ensure environment variables are set for acados
+    os.environ["ACADOS_SOURCE_DIR"] = "/home/chandran/acados"
+    os.environ["LD_LIBRARY_PATH"] = os.environ.get("LD_LIBRARY_PATH", "") + ":/home/chandran/acados/lib"
+
     print("==============================================================")
-    print("Running standalone CasADi turning-circle test...")
+    print("Running standalone CasADi vs Acados SimSolver Comparison...")
     print("==============================================================")
 
     sim_time = 200.0
     dt = 0.05
     time_steps = np.arange(0, sim_time, dt)
 
+    # 1. Instantiate both integrators
     f_casadi = make_casadi_integrator(dt, method="rk4", smooth=True)
+    f_acados = make_acados_integrator(dt, smooth=True)
 
     # Initial state: [u, v, r, x, y, psi]
     state_casadi = ca.DM([0.78, 0.0, 0.0, 0.0, 0.0, 0.0])
+    state_acados = ca.DM([0.78, 0.0, 0.0, 0.0, 0.0, 0.0])
+
     # Constant control: rudder 35 deg, propeller 18.2 rps
     control = ca.DM([np.deg2rad(35.0), 18.2])
 
-    hist_x, hist_y, hist_r = [], [], []
+    hist_casadi_x, hist_casadi_y, hist_casadi_r = [], [], []
+    hist_acados_x, hist_acados_y, hist_acados_r = [], [], []
+
+    print("Running simulations...")
     for t in time_steps:
-        hist_x.append(float(state_casadi[3]))
-        hist_y.append(float(state_casadi[4]))
-        hist_r.append(float(state_casadi[2]))
+        # CasADi histories
+        hist_casadi_x.append(float(state_casadi[3]))
+        hist_casadi_y.append(float(state_casadi[4]))
+        hist_casadi_r.append(float(state_casadi[2]))
+
+        # Acados histories
+        hist_acados_x.append(float(state_acados[3]))
+        hist_acados_y.append(float(state_acados[4]))
+        hist_acados_r.append(float(state_acados[2]))
+
+        # Step both dynamics
         state_casadi, _ = f_casadi(state_casadi, control)
+        state_acados, _ = f_acados(state_acados, control)
+
+    print("Simulations completed successfully. Calculating differences...")
+
+    diff_x = np.abs(np.array(hist_casadi_x) - np.array(hist_acados_x))
+    diff_y = np.abs(np.array(hist_casadi_y) - np.array(hist_acados_y))
+    diff_r = np.abs(np.array(hist_casadi_r) - np.array(hist_acados_r))
+
+    print(f"Max absolute trajectory differences between CasADi RK4 and Acados SimSolver:")
+    print(f"  x: {np.max(diff_x):e} m")
+    print(f"  y: {np.max(diff_y):e} m")
+    print(f"  r: {np.max(diff_r):e} rad/s")
 
     plt.figure(figsize=(12, 5))
+
     plt.subplot(1, 2, 1)
-    plt.plot(hist_y, hist_x, 'b-', linewidth=2)
+    plt.plot(hist_casadi_y, hist_casadi_x, 'b-', label='CasADi RK4', linewidth=2)
+    plt.plot(hist_acados_y, hist_acados_x, 'r--', label='Acados SimSolver', linewidth=1.5)
     plt.scatter(0, 0, marker='P', color='green', s=100, label='Start')
     plt.title('Ship Trajectory (Turning Circle)', fontsize=12, fontweight='bold')
     plt.xlabel('Y Coordinate (m)', fontsize=10)
@@ -301,13 +429,15 @@ if __name__ == "__main__":
     plt.axis('equal')
 
     plt.subplot(1, 2, 2)
-    plt.plot(time_steps, hist_r, 'b-', linewidth=2)
+    plt.plot(time_steps, hist_casadi_r, 'b-', label='CasADi RK4', linewidth=2)
+    plt.plot(time_steps, hist_acados_r, 'r--', label='Acados SimSolver', linewidth=1.5)
     plt.title('Yaw Rate vs Time', fontsize=12, fontweight='bold')
     plt.xlabel('Time (s)', fontsize=10)
     plt.ylabel('Yaw Rate r (rad/s)', fontsize=10)
     plt.grid(True, which='both', linestyle='--', alpha=0.5)
+    plt.legend()
 
     plt.tight_layout()
     plot_path = "casadi_turning_circle_test.png"
     plt.savefig(plot_path)
-    print(f"Turning-circle plot saved to: {plot_path}")
+    print(f"Comparison plot saved to: {os.path.abspath(plot_path)}")
