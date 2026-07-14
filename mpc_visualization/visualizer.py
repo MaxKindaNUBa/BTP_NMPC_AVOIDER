@@ -1,0 +1,198 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+from matplotlib.patches import Circle, Polygon
+from mpc_bridge import MPCBridge
+
+class MPCVisualizer:
+    def __init__(self, bridge: MPCBridge, update_interval_ms: int = 50, run_name: str = "mpc_run"):
+        self.bridge = bridge
+        self.update_interval = update_interval_ms
+        self.is_running = True
+        self.run_name = run_name
+
+        # Setup Figure and Subplots
+        # 1-row, 2-column layout: Left for the Map, Right for the Control Horizon
+        self.fig, (self.ax_map, self.ax_ctrl) = plt.subplots(1, 2, figsize=(14, 7))
+
+        # Setup Map axis
+        self.ax_map.set_aspect('equal')
+        self.ax_map.grid(True, which='both', linestyle='--', alpha=0.5)
+        self.ax_map.set_xlim([-10, 70])
+        self.ax_map.set_ylim([-10, 50])
+        self.ax_map.set_xlabel('Y Coordinate (meters) - East/Lateral', fontsize=11)
+        self.ax_map.set_ylabel('X Coordinate (meters) - North/Longitudinal', fontsize=11)
+        self.ax_map.set_title('Ship Trajectory & State Prediction Overlay', fontsize=13, fontweight='bold')
+
+        # Setup Control Horizon axis
+        self.ax_ctrl.grid(True, linestyle='--', alpha=0.5)
+        self.ax_ctrl.set_title('Control Horizon Inputs (Planned)', fontsize=13, fontweight='bold')
+        self.ax_ctrl.set_xlabel('Horizon Step', fontsize=11)
+        self.ax_ctrl_right = self.ax_ctrl.twinx() # Secondary y-axis for propeller speed
+
+        # Ship geometry parameters (meters)
+        self.L_a = 2.5  # Nose length
+        self.L_b = 1.2  # Stern length
+        self.W_s = 0.8  # Semi-width
+
+        # Map Plot Elements
+        self.ship_patch = None
+        self.pred_line, = self.ax_map.plot([], [], 'g--', linewidth=2, label='NMPC Spatial Prediction')
+        self.ref_line, = self.ax_map.plot([], [], 'k:', alpha=0.4, label='Reference Path')
+        self.start_marker, = self.ax_map.plot([], [], 'go', markersize=9, label='Start')
+        self.goal_marker, = self.ax_map.plot([], [], 'ro', markersize=11, marker='*', label='Goal')
+        self.trail_x = []
+        self.trail_y = []
+        self.trail_line, = self.ax_map.plot([], [], 'b-', linewidth=1.5, alpha=0.6, label='Trajectory History')
+
+        # Telemetry overlay text on map
+        self.info_text = self.ax_map.text(0.02, 0.98, "", transform=self.ax_map.transAxes,
+                                         fontsize=9, fontfamily='monospace',
+                                         verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
+
+        # Horizon Plot Elements
+        self.line_rudder, = self.ax_ctrl.plot([], [], 'g-s', markersize=4, label='Rudder δ (deg)')
+        self.line_rps, = self.ax_ctrl_right.plot([], [], 'r-o', markersize=4, label='Propeller n_p (rps)')
+
+        self.ax_ctrl.set_ylabel('Rudder Angle (deg)', color='g')
+        self.ax_ctrl_right.set_ylabel('Propeller Speed (rps)', color='r')
+
+        # Handle close window event to stop simulation
+        self.fig.canvas.mpl_connect('close_event', self.on_close)
+
+        self.obstacle_patches = []
+        self.fig.tight_layout()
+
+    def on_close(self, event):
+        self.is_running = False
+        print("Visualizer window closed. Exiting sim...")
+
+    def draw_ship_polygon(self, x, y, psi):
+        """
+        Creates a triangle/wedge polygon aligned with heading psi.
+        x is North (vertical on plot), y is East (horizontal on plot).
+        """
+        x1 = x + self.L_a * np.cos(psi)
+        y1 = y + self.L_a * np.sin(psi)
+
+        x2 = x - self.L_b * np.cos(psi) + self.W_s * np.sin(psi)
+        y2 = y - self.L_b * np.sin(psi) - self.W_s * np.cos(psi)
+
+        x3 = x - self.L_b * np.cos(psi) - self.W_s * np.sin(psi)
+        y3 = y - self.L_b * np.sin(psi) + self.W_s * np.cos(psi)
+
+        return np.array([[y1, x1], [y2, x2], [y3, x3]])
+
+    def init_plot(self):
+        self.pred_line.set_data([], [])
+        self.ref_line.set_data([], [])
+        self.trail_line.set_data([], [])
+        self.line_rudder.set_data([], [])
+        self.line_rps.set_data([], [])
+        return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
+                self.line_rudder, self.line_rps)
+
+    def update_plot(self, frame):
+        if not self.is_running:
+            return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
+                    self.line_rudder, self.line_rps)
+
+        snap = self.bridge.snapshot()
+        u, v, r, x, y, psi = snap.ship_state
+
+        # Update map history
+        self.trail_x.append(x)
+        self.trail_y.append(y)
+        self.trail_line.set_data(self.trail_y, self.trail_x)
+
+        # Draw ship
+        vertices = self.draw_ship_polygon(x, y, psi)
+        if self.ship_patch is not None:
+            self.ship_patch.remove()
+        self.ship_patch = Polygon(vertices, facecolor='royalblue', edgecolor='darkblue', zorder=5)
+        self.ax_map.add_patch(self.ship_patch)
+
+        # Update predicted trajectory overlay on the map
+        if len(snap.predicted_trajectory) > 1:
+            pred_y = snap.predicted_trajectory[:, 4]  # Y coordinate
+            pred_x = snap.predicted_trajectory[:, 3]  # X coordinate
+            self.pred_line.set_data(pred_y, pred_x)
+        else:
+            self.pred_line.set_data([], [])
+
+        # Reference path
+        if len(snap.reference_path) > 0:
+            ref_y = snap.reference_path[:, 1]
+            ref_x = snap.reference_path[:, 0]
+            self.ref_line.set_data(ref_y, ref_x)
+
+        self.start_marker.set_data([snap.start[1]], [snap.start[0]])
+        self.goal_marker.set_data([snap.goal[1]], [snap.goal[0]])
+
+        # Redraw obstacles
+        for p in self.obstacle_patches:
+            p.remove()
+        self.obstacle_patches = []
+
+        nearest_obstacle_dist = np.inf
+        ship_pos = np.array([x, y])
+        for obs in snap.obstacles:
+            circle = Circle((obs.y, obs.x), obs.radius, color='red', alpha=0.35, ec='darkred', zorder=3)
+            self.ax_map.add_patch(circle)
+            self.obstacle_patches.append(circle)
+
+            dist = np.linalg.norm(ship_pos - np.array([obs.x, obs.y])) - obs.radius
+            if dist < nearest_obstacle_dist:
+                nearest_obstacle_dist = dist
+
+        goal_dist = np.linalg.norm(ship_pos - np.array(snap.goal))
+
+        # Get active control input to show in telemetry
+        if len(snap.control_horizon) > 0:
+            delta_curr = snap.control_horizon[0, 0]
+            rps_curr = snap.control_horizon[0, 1]
+        else:
+            delta_curr, rps_curr = 0.0, 0.0
+
+        # Update telemetry overlay
+        text = (
+            f"=== SHIP STATUS ===\n"
+            f"u (Surge) : {u:6.3f} m/s\n"
+            f"v (Sway)  : {v:6.3f} m/s\n"
+            f"r (Yaw Rt): {r:6.3f} rad/s\n"
+            f"Heading   : {np.rad2deg(psi):6.1f} deg\n\n"
+            f"=== CONTROLS ===\n"
+            f"Rudder    : {np.rad2deg(delta_curr):6.1f} deg\n"
+            f"Propeller : {rps_curr:6.1f} rps\n\n"
+            f"=== TARGETS ===\n"
+            f"Goal Dist : {goal_dist:6.2f} m\n"
+            f"Obs Dist  : {nearest_obstacle_dist:6.2f} m"
+        )
+        self.info_text.set_text(text)
+
+        # Update Control Horizon plot
+        steps_ctrl = np.arange(len(snap.control_horizon))
+        if len(steps_ctrl) > 0:
+            rudders_deg = np.rad2deg(snap.control_horizon[:, 0])
+            rpss = snap.control_horizon[:, 1]
+
+            self.line_rudder.set_data(steps_ctrl, rudders_deg)
+            self.line_rps.set_data(steps_ctrl, rpss)
+
+            # Rescale axis bounds dynamically
+            self.ax_ctrl.set_xlim([0, max(1, len(steps_ctrl) - 1)])
+            self.ax_ctrl.set_ylim([min(rudders_deg) - 2.0, max(rudders_deg) + 2.0])
+            self.ax_ctrl_right.set_ylim([min(rpss) - 1.0, max(rpss) + 1.0])
+
+        if frame == 0:
+            self.ax_map.legend(loc='upper right', fontsize=8)
+            lines_ctrl = [self.line_rudder, self.line_rps]
+            self.ax_ctrl.legend(lines_ctrl, [l.get_label() for l in lines_ctrl], loc='upper right', fontsize=8)
+
+        return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
+                self.line_rudder, self.line_rps)
+
+    def start(self):
+        self.anim = FuncAnimation(self.fig, self.update_plot, init_func=self.init_plot,
+                                  interval=self.update_interval, blit=True)
+        plt.show()
