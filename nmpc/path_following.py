@@ -8,6 +8,7 @@ Formulas: main.pdf Eq. (1)/(17-19), idekewfewf.pdf Eq. (51).
 import os
 import sys
 import numpy as np
+import casadi as ca
 
 # allow running this file directly (python nmpc/path_following.py) by putting
 # the repo root on sys.path, so `nmpc` resolves as a package
@@ -24,6 +25,13 @@ def wrap_to_pi(angle: float) -> float:
     return (angle + np.pi) % (2.0 * np.pi) - np.pi
 
 
+def wrap180_casadi(theta):
+    """Symbolic (CasADi/acados-safe) twin of wrap_to_pi: smooth wrap into (-pi, pi].
+    Built from atan2(sin,cos) so it's differentiable everywhere except the single
+    +-pi branch cut (same as any angle wrap) — safe to use inside NLP cost terms."""
+    return ca.atan2(ca.sin(theta), ca.cos(theta))
+
+
 def compute_path_angle(wp_a, wp_b) -> float:
     """Heading of the straight-line segment wp_a -> wp_b."""
     return float(np.arctan2(wp_b[1] - wp_a[1], wp_b[0] - wp_a[0]))
@@ -35,9 +43,11 @@ def compute_cross_track_error(x, y, x_d, y_d, chi_p) -> float:
 
 
 def compute_sideslip(u, v) -> float:
-    """Drift angle between heading and actual velocity direction."""
-    U = np.sqrt(u**2 + v**2)
-    return float(np.arcsin(v / U)) if U > 1e-6 else 0.0
+    """Drift angle between heading and actual velocity direction.
+    atan2(-v,u), matching casadi_mmg.py's own internal convention exactly
+    (NOT asin(v/U) — that form is sign-blind to reverse thrust: it can't
+    tell u>0 from u<0, so it silently breaks once the ship goes astern)."""
+    return float(np.arctan2(-v, u))
 
 
 def compute_course_angle(psi, beta) -> float:

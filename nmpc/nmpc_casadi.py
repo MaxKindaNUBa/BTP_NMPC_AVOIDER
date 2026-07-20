@@ -18,7 +18,7 @@ from nmpc.config import (
     IDX_DDELTA, IDX_DN,
 )
 from nmpc.state_augmentation import make_rk4_step
-from nmpc.path_following import build_xi_full, pad_obstacles
+from nmpc.path_following import build_xi_full, pad_obstacles, wrap180_casadi
 
 
 class CasadiNMPC:
@@ -94,11 +94,18 @@ class CasadiNMPC:
         Qe = ca.DM(cfg.Qe)
 
         # ---- cost: sum of stage costs + terminal cost + slack penalty ----
+        # psi row of dx is wrapped into (-pi,pi] before squaring: raw psi drifts
+        # unbounded (never wraps) while chi_p stays in (-pi,pi], so late in a long
+        # rollout an otherwise-fine heading can read as a huge, spurious error at
+        # this row's dominant Q weight. Wrapping keeps the residual meaningful
+        # without changing the paper's weight structure (main.pdf Q[psi]=30).
         cost = 0
         for k in range(N):
             dx = X[:, k] - xi_ref
+            dx[IDX_PSI] = wrap180_casadi(dx[IDX_PSI])
             cost += ca.mtimes([dx.T, Q, dx]) + ca.mtimes([U[:, k].T, R, U[:, k]])
         dxN = X[:, N] - xi_ref
+        dxN[IDX_PSI] = wrap180_casadi(dxN[IDX_PSI])
         cost += ca.mtimes([dxN.T, Qe, dxN])
         if self.n_slack_steps > 0:
             cost += cfg.W_SLACK * ca.sumsqr(S)  # penalize obstacle-constraint violations

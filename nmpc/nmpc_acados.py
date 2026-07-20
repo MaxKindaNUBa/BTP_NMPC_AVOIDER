@@ -33,7 +33,9 @@ from nmpc.config import (
     IDX_DDELTA, IDX_DN,
 )
 from nmpc.state_augmentation import augmented_dynamics_casadi
-from nmpc.path_following import build_xi_full, pad_obstacles, get_reference_state
+from nmpc.path_following import (
+    build_xi_full, pad_obstacles, get_reference_state, wrap180_casadi,
+)
 
 
 def _param_vector(config):
@@ -78,28 +80,41 @@ def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
     ocp.model = model
     ocp.dims.N = N
 
-    # ---- cost: LINEAR_LS, y = [xi; u_aug] tracked to yref ----
+    # ---- cost: NONLINEAR_LS, y = [xi with psi row wrapped; u_aug] tracked to yref ----
+    # (matches CasadiNMPC's cost exactly, including the psi wrap — see nmpc_casadi.py's
+    # _build_nlp for why: raw psi never wraps back to (-pi,pi] but chi_p does, so a
+    # long rollout can read an otherwise-fine heading as a huge error at this row's
+    # dominant Q weight (main.pdf Q[psi]=30). LINEAR_LS can't express a wrapped
+    # residual (not affine in xi), hence NONLINEAR_LS here instead of the plain
+    # Vx/Vu selection-matrix form used for every other state.)
     ny = STATE_DIM + CONTROL_DIM
     ny_e = STATE_DIM
 
-    ocp.cost.cost_type = "LINEAR_LS"
-    ocp.cost.cost_type_e = "LINEAR_LS"
+    ocp.cost.cost_type = "NONLINEAR_LS"
+    ocp.cost.cost_type_0 = "NONLINEAR_LS"  # explicit stage-0 cost type, avoids acados defaulting elsewhere
+    ocp.cost.cost_type_e = "NONLINEAR_LS"
 
-    Vx = np.zeros((ny, STATE_DIM))
-    Vx[:STATE_DIM, :STATE_DIM] = np.eye(STATE_DIM)
-    Vu = np.zeros((ny, CONTROL_DIM))
-    Vu[STATE_DIM:, :] = np.eye(CONTROL_DIM)
-    ocp.cost.Vx = Vx
-    ocp.cost.Vu = Vu
-    ocp.cost.Vx_e = np.eye(ny_e)
+    y_state = ca.vertcat(*[
+        wrap180_casadi(xi[i] - chi_p) if i == IDX_PSI else xi[i]
+        for i in range(STATE_DIM)
+    ])
+    model.cost_y_expr = ca.vertcat(y_state, u_aug)
+    model.cost_y_expr_0 = model.cost_y_expr
+    model.cost_y_expr_e = y_state
 
     ocp.cost.W = _block_diag(config.Q, config.R)     # stage weight = blockdiag(Q, R)
+    ocp.cost.W_0 = _block_diag(config.Q, config.R)
     ocp.cost.W_e = config.Qe                          # terminal weight
 
-    # placeholder yref (overwritten every solve() call, but acados requires a valid initial value)
+    # placeholder yref (overwritten every solve() call, but acados requires a valid initial value).
+    # psi's target is 0 here (not chi_p) because cost_y_expr already turns that row into
+    # the wrapped residual (psi - chi_p) directly — the wrap+subtraction is baked into y,
+    # so the target for it is simply "zero residual", same convention _yref_wrap_psi() uses at runtime.
     xi_ref0 = get_reference_state(0.0, 0.0, 0.0, config.U_REF, config.DELTA_TRIM, config.N_TRIM, config)
-    ocp.cost.yref = np.concatenate([xi_ref0, np.zeros(CONTROL_DIM)])
-    ocp.cost.yref_e = xi_ref0
+    yref0 = _yref_wrap_psi(xi_ref0)
+    ocp.cost.yref = np.concatenate([yref0, np.zeros(CONTROL_DIM)])
+    ocp.cost.yref_0 = np.concatenate([yref0, np.zeros(CONTROL_DIM)])
+    ocp.cost.yref_e = yref0
 
     # ---- obstacle (soft) constraints: h >= 0, relaxable by slack down to -SIGMA ----
     if n_obs > 0:
@@ -143,6 +158,15 @@ def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
     return ocp
 
 
+def _yref_wrap_psi(xi_ref: np.ndarray) -> np.ndarray:
+    """xi_ref with the psi entry zeroed — pairs with the NONLINEAR_LS cost_y_expr
+    above, which already turns that row into the wrapped residual (psi - chi_p),
+    so the target for it is just zero (not chi_p, which is baked into y itself)."""
+    out = xi_ref.copy()
+    out[IDX_PSI] = 0.0
+    return out
+
+
 def _block_diag(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Combines two square matrices into one block-diagonal matrix."""
     na, nb = a.shape[0], b.shape[0]
@@ -176,6 +200,7 @@ class AcadosNMPC:
         params = np.concatenate([[chi_p, x_d, y_d], obs_flat])  # matches _param_vector() order
 
         xi_ref = get_reference_state(chi_p, x_d, y_d, cfg.U_REF, cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
+        xi_ref = _yref_wrap_psi(xi_ref)  # psi row target is 0 (wrapped residual baked into cost_y_expr)
         yref = np.concatenate([xi_ref, np.zeros(CONTROL_DIM)])
 
         # pin the initial state to the actual current state (standard MPC shrinking-horizon setup)
