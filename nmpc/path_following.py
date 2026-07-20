@@ -124,7 +124,7 @@ def build_xi_full(mmg_state, delta, n, chi_p, x_d, y_d) -> np.ndarray:
     return xi
 
 
-def pad_obstacles(obstacles, max_obstacles: int, dummy_pos: float = 1.0e6) -> np.ndarray:
+def pad_obstacles(obstacles, max_obstacles: int, dummy_pos: float = 1.0e3) -> np.ndarray:
     """Pads/truncates obstacle list to a fixed length so the NLP/OCP obstacle
     block has a constant size. Unused slots get a far-away dummy obstacle
     (zero radius) so their constraint is always trivially satisfied."""

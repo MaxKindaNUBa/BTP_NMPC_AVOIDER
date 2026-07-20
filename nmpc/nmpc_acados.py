@@ -1,0 +1,220 @@
+"""
+Step B — same NMPC problem as nmpc_casadi.py, implemented with Acados OCP for
+real-time SQP-RTI. Only meaningful once Step A (CasADi IPOPT) is validated.
+"""
+import os
+import sys
+import time
+import numpy as np
+import casadi as ca
+
+# allow running this file directly (python nmpc/nmpc_acados.py) by putting
+# the repo root on sys.path, so `nmpc` resolves as a package
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+os.environ.setdefault("ACADOS_SOURCE_DIR", "/home/chandran/acados")
+_acados_lib_dir = "/home/chandran/acados/lib"
+if os.path.exists(_acados_lib_dir):
+    # preload shared libs so LD_LIBRARY_PATH doesn't need to be set beforehand
+    import ctypes
+    try:
+        mode = ctypes.RTLD_GLOBAL
+        for _lib in ["libqdldl.so", "libosqp.so", "libqpOASES_e.so",
+                     "libblasfeo.so", "libhpipm.so", "libacados.so"]:
+            ctypes.CDLL(os.path.join(_acados_lib_dir, _lib), mode=mode)
+    except Exception as e:
+        print(f"Warning: programmatically loading acados libraries failed: {e}")
+
+from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
+
+from nmpc.config import (
+    DEFAULT_CONFIG, STATE_DIM, CONTROL_DIM,
+    IDX_EY, IDX_SPSI, IDX_CPSI, IDX_R, IDX_X, IDX_Y, IDX_PSI, IDX_U, IDX_V, IDX_DELTA, IDX_N,
+    IDX_DDELTA, IDX_DN,
+)
+from nmpc.state_augmentation import augmented_dynamics_casadi
+from nmpc.path_following import build_xi_full, pad_obstacles, get_reference_state
+
+
+def _param_vector(config):
+    """Length of the runtime parameter vector p:
+    p = [chi_p, x_d, y_d, x_obs_1, y_obs_1, r_obs_1, ...]"""
+    return 3 + 3 * config.MAX_OBSTACLES
+
+
+def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
+    """Builds the acados OCP definition once, ahead of time (compiled to C).
+    Runtime values are set later via solver.set(...) in AcadosNMPC.solve()."""
+    N, n_obs = config.N, config.MAX_OBSTACLES
+
+    # ---- model: state, control, params, and the ODE right-hand side ----
+    model = AcadosModel()
+    model.name = "nmpc_mmg_augmented"
+
+    xi = ca.SX.sym("xi", STATE_DIM)
+    u_aug = ca.SX.sym("u_aug", CONTROL_DIM)
+    p = ca.SX.sym("p", _param_vector(config))
+
+    chi_p = p[0]
+    x_d = p[1]
+    y_d = p[2]
+    obs_p = p[3:]
+
+    model.x = xi
+    model.u = u_aug
+    model.p = p
+    model.f_expl_expr = augmented_dynamics_casadi(xi, u_aug, chi_p)  # same dynamics as CasadiNMPC
+
+    # obstacle constraint expressions, one row per fixed obstacle slot:
+    # (x_k - x_obs_i)^2 + (y_k - y_obs_i)^2 - r_c_i^2 + s_i >= 0
+    h_list = []
+    for i in range(n_obs):
+        ox, oy, orad = obs_p[3 * i], obs_p[3 * i + 1], obs_p[3 * i + 2]
+        r_c = orad + config.R_ASV
+        h_list.append((xi[IDX_X] - ox) ** 2 + (xi[IDX_Y] - oy) ** 2 - r_c ** 2)
+    model.con_h_expr = ca.vertcat(*h_list) if n_obs > 0 else ca.SX.zeros(0)
+
+    ocp = AcadosOcp()
+    ocp.model = model
+    ocp.dims.N = N
+
+    # ---- cost: LINEAR_LS, y = [xi; u_aug] tracked to yref ----
+    ny = STATE_DIM + CONTROL_DIM
+    ny_e = STATE_DIM
+
+    ocp.cost.cost_type = "LINEAR_LS"
+    ocp.cost.cost_type_e = "LINEAR_LS"
+
+    Vx = np.zeros((ny, STATE_DIM))
+    Vx[:STATE_DIM, :STATE_DIM] = np.eye(STATE_DIM)
+    Vu = np.zeros((ny, CONTROL_DIM))
+    Vu[STATE_DIM:, :] = np.eye(CONTROL_DIM)
+    ocp.cost.Vx = Vx
+    ocp.cost.Vu = Vu
+    ocp.cost.Vx_e = np.eye(ny_e)
+
+    ocp.cost.W = _block_diag(config.Q, config.R)     # stage weight = blockdiag(Q, R)
+    ocp.cost.W_e = config.Qe                          # terminal weight
+
+    # placeholder yref (overwritten every solve() call, but acados requires a valid initial value)
+    xi_ref0 = get_reference_state(0.0, 0.0, 0.0, config.U_REF, config.DELTA_TRIM, config.N_TRIM, config)
+    ocp.cost.yref = np.concatenate([xi_ref0, np.zeros(CONTROL_DIM)])
+    ocp.cost.yref_e = xi_ref0
+
+    # ---- obstacle (soft) constraints: h >= 0, relaxable by slack down to -SIGMA ----
+    if n_obs > 0:
+        ocp.constraints.lh = np.zeros(n_obs)
+        ocp.constraints.uh = np.full(n_obs, 1e8)  # "no upper bound"; kept << ACADOS_INFTY (1e10)
+        ocp.constraints.idxsh = np.arange(n_obs)   # marks all h rows as soft (slacked)
+        ocp.cost.zl = np.zeros(n_obs)
+        ocp.cost.zu = np.zeros(n_obs)
+        ocp.cost.Zl = config.W_SLACK * np.ones(n_obs)   # quadratic slack penalty weight
+        ocp.cost.Zu = config.W_SLACK * np.ones(n_obs)
+        ocp.constraints.lsh = -config.SIGMA * np.ones(n_obs)  # max allowed relaxation
+        ocp.constraints.ush = np.zeros(n_obs)
+
+    # ---- state/control bounds ----
+    ocp.constraints.x0 = np.array(xi_ref0)  # placeholder; overwritten every solve() call
+
+    ocp.constraints.idxbx = np.array([IDX_DELTA, IDX_N])   # only delta/n states are bounded
+    ocp.constraints.lbx = np.array([config.DELTA_MIN, config.RPS_MIN])
+    ocp.constraints.ubx = np.array([config.DELTA_MAX, config.RPS_MAX])
+
+    ocp.constraints.idxbx_e = np.array([IDX_DELTA, IDX_N])  # same bounds at the terminal stage
+    ocp.constraints.lbx_e = np.array([config.DELTA_MIN, config.RPS_MIN])
+    ocp.constraints.ubx_e = np.array([config.DELTA_MAX, config.RPS_MAX])
+
+    ocp.constraints.idxbu = np.array([IDX_DDELTA, IDX_DN])  # rate limits on both controls
+    ocp.constraints.lbu = np.array([config.DELTA_DOT_MIN, config.RPS_DOT_MIN])
+    ocp.constraints.ubu = np.array([config.DELTA_DOT_MAX, config.RPS_DOT_MAX])
+
+    ocp.parameter_values = np.zeros(_param_vector(config))  # placeholder, overwritten every solve() call
+
+    # ---- solver options ----
+    ocp.solver_options.nlp_solver_type = config.ACADOS_NLP_SOLVER   # SQP_RTI = one Newton step per solve() call
+    ocp.solver_options.integrator_type = config.ACADOS_INTEGRATOR
+    ocp.solver_options.sim_method_num_stages = config.ACADOS_NUM_STAGES
+    ocp.solver_options.sim_method_num_steps = config.ACADOS_NUM_STEPS
+    ocp.solver_options.qp_solver = config.ACADOS_QP_SOLVER
+    ocp.solver_options.hessian_approx = "GAUSS_NEWTON"
+    ocp.solver_options.tf = config.T_horizon
+    ocp.code_export_directory = config.ACADOS_CODE_EXPORT_DIR  # where the generated C solver lands
+
+    return ocp
+
+
+def _block_diag(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Combines two square matrices into one block-diagonal matrix."""
+    na, nb = a.shape[0], b.shape[0]
+    out = np.zeros((na + nb, na + nb))
+    out[:na, :na] = a
+    out[na:, na:] = b
+    return out
+
+
+class AcadosNMPC:
+    def __init__(self, config=DEFAULT_CONFIG):
+        self.config = config
+        self.N = config.N
+        self.dt = config.dt
+        self.n_obs = config.MAX_OBSTACLES
+
+        ocp = build_acados_ocp(config)
+        json_path = os.path.join(os.path.dirname(__file__), "..", config.ACADOS_JSON_FILE)
+        self.solver = AcadosOcpSolver(ocp, json_file=json_path)  # triggers C code-gen + compile on first call
+
+        self._last_delta = config.DELTA_TRIM  # fallback command if a solve ever fails
+        self._last_n = config.N_TRIM
+
+    def solve(self, mmg_state, delta, n, chi_p, x_d, y_d, obstacles=None):
+        cfg = self.config
+        if obstacles is None:
+            obstacles = []
+
+        xi_0 = build_xi_full(mmg_state, delta, n, chi_p, x_d, y_d)
+        obs_flat = pad_obstacles(obstacles, self.n_obs)
+        params = np.concatenate([[chi_p, x_d, y_d], obs_flat])  # matches _param_vector() order
+
+        xi_ref = get_reference_state(chi_p, x_d, y_d, cfg.U_REF, cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
+        yref = np.concatenate([xi_ref, np.zeros(CONTROL_DIM)])
+
+        # pin the initial state to the actual current state (standard MPC shrinking-horizon setup)
+        self.solver.set(0, "lbx", xi_0)
+        self.solver.set(0, "ubx", xi_0)
+
+        # push the same reference/parameters into every stage of the horizon
+        for k in range(self.N):
+            self.solver.set(k, "yref", yref)
+            self.solver.set(k, "p", params)
+        self.solver.set(self.N, "yref", xi_ref)
+        self.solver.set(self.N, "p", params)
+
+        t0 = time.perf_counter()
+        status = self.solver.solve()  # one SQP-RTI iteration; internal iterate persists across calls (warm start)
+        solve_time = time.perf_counter() - t0
+
+        success = (status == 0)
+
+        u0 = self.solver.get(0, "u")
+        xi_traj = np.array([self.solver.get(k, "x") for k in range(self.N + 1)]).T
+        u_traj = np.array([self.solver.get(k, "u") for k in range(self.N)]).T
+
+        if success:
+            # integrate the first optimal rate one dt step to get the new actuator command
+            delta_dot, n_dot = u0[IDX_DDELTA], u0[IDX_DN]
+            delta_new = np.clip(delta + delta_dot * self.dt, cfg.DELTA_MIN, cfg.DELTA_MAX)
+            n_new = np.clip(n + n_dot * self.dt, cfg.RPS_MIN, cfg.RPS_MAX)
+            self._last_delta, self._last_n = delta_new, n_new
+        else:
+            # fall back to holding the previous actuator command
+            delta_new, n_new = self._last_delta, self._last_n
+
+        return {
+            "u_opt": u_traj,
+            "xi_traj": xi_traj,
+            "delta": float(delta_new),
+            "n": float(n_new),
+            "solve_time": solve_time,
+            "success": success,
+            "return_status": status,
+        }
