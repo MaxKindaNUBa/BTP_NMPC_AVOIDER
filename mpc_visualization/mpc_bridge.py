@@ -22,6 +22,7 @@ class MPCBridgeState:
     obstacles: List[Obstacle]
     start: Tuple[float, float]
     goal: Tuple[float, float]
+    active_waypoint: Optional[Tuple[float, float]] = None  # (x, y) target the NMPC is currently steering toward
 
 class MPCBridge:
     """
@@ -40,6 +41,7 @@ class MPCBridge:
         self._obstacles: List[Obstacle] = []
         self._start = start
         self._goal = goal
+        self._active_waypoint = None  # set via set_active_waypoint() once a multi-leg path is in play
 
     def update_ship_state(self, state: np.ndarray, t: float):
         with self._lock:
@@ -54,6 +56,12 @@ class MPCBridge:
     def set_obstacles(self, obstacles: List[Obstacle]):
         with self._lock:
             self._obstacles = list(obstacles)
+
+    def set_active_waypoint(self, waypoint: Optional[Tuple[float, float]]):
+        """Records the (x, y) waypoint the NMPC is currently steering toward,
+        so the visualizer can mark it distinctly from the overall start/goal."""
+        with self._lock:
+            self._active_waypoint = tuple(waypoint) if waypoint is not None else None
 
     def set_start_goal(self, start: Tuple[float, float], goal: Tuple[float, float]):
         with self._lock:
@@ -102,5 +110,6 @@ class MPCBridge:
                 reference_path=self._reference_path.copy(),
                 obstacles=list(self._obstacles),
                 start=self._start,
-                goal=self._goal
+                goal=self._goal,
+                active_waypoint=self._active_waypoint
             )

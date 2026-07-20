@@ -41,6 +41,9 @@ class MPCVisualizer:
         self.ref_line, = self.ax_map.plot([], [], 'k:', alpha=0.4, label='Reference Path')
         self.start_marker, = self.ax_map.plot([], [], 'go', markersize=9, label='Start')
         self.goal_marker, = self.ax_map.plot([], [], 'ro', markersize=11, marker='*', label='Goal')
+        self.active_wp_marker, = self.ax_map.plot([], [], marker='D', color='orange', markersize=10,
+                                                   markeredgecolor='darkorange', linestyle='None',
+                                                   zorder=6, label='Active Waypoint')
         self.trail_x = []
         self.trail_y = []
         self.trail_line, = self.ax_map.plot([], [], 'b-', linewidth=1.5, alpha=0.6, label='Trajectory History')
@@ -89,13 +92,14 @@ class MPCVisualizer:
         self.trail_line.set_data([], [])
         self.line_rudder.set_data([], [])
         self.line_rps.set_data([], [])
+        self.active_wp_marker.set_data([], [])
         return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
-                self.line_rudder, self.line_rps)
+                self.line_rudder, self.line_rps, self.active_wp_marker)
 
     def update_plot(self, frame):
         if not self.is_running:
             return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
-                    self.line_rudder, self.line_rps)
+                    self.line_rudder, self.line_rps, self.active_wp_marker)
 
         snap = self.bridge.snapshot()
         u, v, r, x, y, psi = snap.ship_state
@@ -129,6 +133,13 @@ class MPCVisualizer:
         self.start_marker.set_data([snap.start[1]], [snap.start[0]])
         self.goal_marker.set_data([snap.goal[1]], [snap.goal[0]])
 
+        # Active waypoint: the intermediate leg target the NMPC is currently
+        # steering toward, distinct from the overall start/goal on multi-leg paths.
+        if snap.active_waypoint is not None:
+            self.active_wp_marker.set_data([snap.active_waypoint[1]], [snap.active_waypoint[0]])
+        else:
+            self.active_wp_marker.set_data([], [])
+
         # Redraw obstacles
         for p in self.obstacle_patches:
             p.remove()
@@ -146,6 +157,10 @@ class MPCVisualizer:
                 nearest_obstacle_dist = dist
 
         goal_dist = np.linalg.norm(ship_pos - np.array(snap.goal))
+        if snap.active_waypoint is not None:
+            active_wp_dist = np.linalg.norm(ship_pos - np.array(snap.active_waypoint))
+        else:
+            active_wp_dist = goal_dist
 
         # Get active control input to show in telemetry
         if len(snap.control_horizon) > 0:
@@ -165,6 +180,7 @@ class MPCVisualizer:
             f"Rudder    : {np.rad2deg(delta_curr):6.1f} deg\n"
             f"Propeller : {rps_curr:6.1f} rps\n\n"
             f"=== TARGETS ===\n"
+            f"Active WP : {active_wp_dist:6.2f} m\n"
             f"Goal Dist : {goal_dist:6.2f} m\n"
             f"Obs Dist  : {nearest_obstacle_dist:6.2f} m"
         )
@@ -190,7 +206,7 @@ class MPCVisualizer:
             self.ax_ctrl.legend(lines_ctrl, [l.get_label() for l in lines_ctrl], loc='upper right', fontsize=8)
 
         return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
-                self.line_rudder, self.line_rps)
+                self.line_rudder, self.line_rps, self.active_wp_marker)
 
     def start(self):
         self.anim = FuncAnimation(self.fig, self.update_plot, init_func=self.init_plot,
