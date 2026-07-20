@@ -50,7 +50,7 @@ class NMPCConfig:
     """All tunable NMPC parameters. Override via NMPCConfig(field=value, ...)."""
 
     # ---------------- Horizon parameters ----------------
-    N: int = 20                 # prediction horizon steps
+    N: int = 100                 # prediction horizon steps
     dt: float = 0.1             # sampling time [s]
 
     # ---------------- Ship geometry ----------------
@@ -59,15 +59,15 @@ class NMPCConfig:
     R_ASV: float = field(init=False)  # derived in __post_init__, not settable directly
 
     # ---------------- Actuator bounds ----------------
-    DELTA_MIN: float = -np.deg2rad(35.0)   # rudder angle lower bound [rad]
-    DELTA_MAX: float = np.deg2rad(35.0)    # rudder angle upper bound [rad]
+    DELTA_MIN: float = -np.deg2rad(45.0)   # rudder angle lower bound [rad]
+    DELTA_MAX: float = np.deg2rad(45.0)    # rudder angle upper bound [rad]
     DELTA_DOT_MIN: float = -np.deg2rad(30.0)  # rudder rate lower bound [rad/s]
     DELTA_DOT_MAX: float = np.deg2rad(30.0)   # rudder rate upper bound [rad/s]
 
     RPS_MIN: float = -18.2      # propeller speed lower bound [rps] (bidirectional)
     RPS_MAX: float = 18.2       # propeller speed upper bound [rps]
-    RPS_DOT_MIN: float = -20.0  # propeller acceleration lower bound [rps/s]
-    RPS_DOT_MAX: float = 20.0   # propeller acceleration upper bound [rps/s]
+    RPS_DOT_MIN: float = -5.0  # propeller acceleration lower bound [rps/s]
+    RPS_DOT_MAX: float = 5.0   # propeller acceleration upper bound [rps/s]
 
     # ---------------- Reference / trim ----------------
     U_REF: float = 0.78        # desired surge speed [m/s] (Preliminary_func.py initial condition)
@@ -88,9 +88,12 @@ class NMPCConfig:
 
     # ---------------- Weight matrices (Section 1.6) ----------------
     # Order: [e_y, sin(psi_e), cos(psi_e), r, x, y, psi, u, v, delta, n]
-    # Starting point: the reference paper's own published weight vector,
-    # remapped onto this project's MMG-based state indices.
-    Q_DIAG: tuple = (0.0, 2.0, 2.0, 0.5, 0.0, 0.0, 30.0, 0.0, 0.0, 0.001, 0.001)
+    # NOTE: paper's own starting value has e_y weight = 0, which leaves cross-track
+    # error unpenalized (heading aligns with the path but never nulls the offset).
+    # Bumped to a small non-zero value (5.0) purely for closed-loop stability during
+    # the first open-loop test run - all 4 tests failed with the paper's e_y=0 value,
+    # since the optimizer had zero incentive to null a constant cross-track offset.
+    Q_DIAG: tuple = (5.0, 2.0, 2.0, 0.5, 0.0, 0.0, 30.0, 0.0, 0.0, 0.001, 0.001)
     R_DIAG: tuple = (0.001, 0.001)          # penalizes [delta_dot, n_dot]
     QE_SCALE: float = 2.0                   # terminal cost = QE_SCALE * stage cost (standard choice)
 
