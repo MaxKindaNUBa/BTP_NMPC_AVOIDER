@@ -85,8 +85,18 @@ def get_reference_state(chi_p, x_d, y_d, U_ref, delta_trim=None, n_trim=None,
 
 def select_active_waypoint(x, y, waypoints, current_idx, wp_radius: float = None,
                             config=DEFAULT_CONFIG) -> int:
-    """Advances current_idx to current_idx+1 once the ship has come within
-    wp_radius of the target waypoint."""
+    """Advances current_idx to current_idx+1 once the ship has either come within
+    wp_radius of the target waypoint, OR crossed the perpendicular "gate" plane
+    through it (projection of (x,y) onto the prev_wp->wp leg direction is past wp).
+
+    The radius-only check can fail to fire forever: a large initial heading error
+    makes the turning transient converge onto the path's line well beyond the
+    target point, so Euclidean distance to that point never dips below wp_radius
+    again (see test3_waypoint_switching_issue.md). The along-track gate test
+    catches this because it only cares about progress along the leg direction,
+    not lateral offset, so it fires exactly once as the ship passes abeam of the
+    waypoint no matter how wide the turn was.
+    """
     if wp_radius is None:
         wp_radius = config.WP_RADIUS
 
@@ -94,9 +104,21 @@ def select_active_waypoint(x, y, waypoints, current_idx, wp_radius: float = None
     current_idx = min(current_idx, last_idx)
     wp = waypoints[current_idx]
     dist = np.sqrt((x - wp[0]) ** 2 + (y - wp[1]) ** 2)
+    reached = dist < wp_radius
 
-    if dist < wp_radius and current_idx < last_idx:
-        current_idx += 1
+    if not reached and current_idx > 0:
+        prev_wp = waypoints[current_idx - 1]
+        leg_dx, leg_dy = wp[0] - prev_wp[0], wp[1] - prev_wp[1]
+        leg_len = np.hypot(leg_dx, leg_dy)
+        if leg_len > 1e-9:
+            # along-track position of (x,y) relative to wp, projected onto the
+            # leg direction; >= 0 once (x,y) has crossed the plane through wp
+            # perpendicular to the leg, regardless of cross-track offset there.
+            along = ((x - wp[0]) * leg_dx + (y - wp[1]) * leg_dy) / leg_len
+            reached = along >= 0.0
+
+    if reached and current_idx < last_idx:
+        current_idx += 1   # close enough, or already passed it -> move to next leg
     return min(current_idx, last_idx)
 
 
@@ -188,6 +210,13 @@ if __name__ == "__main__":
     idx2 = select_active_waypoint(2.0, -4.0, waypoints, current_idx=1, wp_radius=1.0)
     print(f"waypoint idx before wp1 gate = {idx2} (expected 1, stays)")
     assert idx2 == 1
+
+    # Regression test for test3_waypoint_switching_issue.md: a wide turning
+    # transient overshoots leg 1's line, landing far (Euclidean) from wp1 but
+    # past its perpendicular gate -> must still switch via the along-track test.
+    idx3 = select_active_waypoint(0.0, -50.0, waypoints, current_idx=1, wp_radius=1.0)
+    print(f"waypoint idx past wp1 gate (overshoot) = {idx3} (expected 2, switches via gate)")
+    assert idx3 == 2
 
     mmg_state = [0.78, 0.0, 0.0, 1.5, 0.0, 0.0]
     xi = build_xi_full(mmg_state, delta=0.0, n=10.0, chi_p=chi_p, x_d=0.0, y_d=-30.0)
