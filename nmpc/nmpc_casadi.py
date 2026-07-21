@@ -18,7 +18,7 @@ from nmpc.config import (
     IDX_DDELTA, IDX_DN,
 )
 from nmpc.state_augmentation import make_rk4_step
-from nmpc.path_following import build_xi_full, pad_obstacles, wrap180_casadi
+from nmpc.path_following import build_xi_full, pad_obstacles, wrap180_casadi, compute_effective_u_ref
 
 
 class CasadiNMPC:
@@ -51,8 +51,8 @@ class CasadiNMPC:
     # ------------------------------------------------------------------
     def _param_layout(self):
         """Length of the runtime parameter vector p passed into solve():
-        p = [xi_0(11), chi_p(1), x_d(1), y_d(1), obs(3*n_obs)]"""
-        n = STATE_DIM + 3 + 3 * self.n_obs
+        p = [xi_0(11), chi_p(1), x_d(1), y_d(1), u_ref(1), obs(3*n_obs)]"""
+        n = STATE_DIM + 4 + 3 * self.n_obs
         return n
 
     def _build_nlp(self):
@@ -73,9 +73,10 @@ class CasadiNMPC:
         chi_p = p[STATE_DIM]
         x_d = p[STATE_DIM + 1]
         y_d = p[STATE_DIM + 2]
-        obs_p = p[STATE_DIM + 3:]  # (3*n_obs,) flattened [x_i, y_i, r_i, ...]
+        u_ref_p = p[STATE_DIM + 3]  # distance-scaled speed target, computed fresh in solve()
+        obs_p = p[STATE_DIM + 4:]  # (3*n_obs,) flattened [x_i, y_i, r_i, ...]
 
-        # build xi_ref symbolically from the parameters (chi_p, x_d, y_d change every solve)
+        # build xi_ref symbolically from the parameters (chi_p, x_d, y_d, u_ref_p change every solve)
         xi_ref = ca.MX.zeros(STATE_DIM)
         xi_ref[IDX_EY] = 0.0
         xi_ref[IDX_SPSI] = 0.0
@@ -84,7 +85,7 @@ class CasadiNMPC:
         xi_ref[IDX_X] = x_d
         xi_ref[IDX_Y] = y_d
         xi_ref[IDX_PSI] = chi_p
-        xi_ref[IDX_U] = cfg.U_REF
+        xi_ref[IDX_U] = u_ref_p
         xi_ref[IDX_V] = 0.0
         xi_ref[IDX_DELTA] = cfg.DELTA_TRIM
         xi_ref[IDX_N] = cfg.N_TRIM
@@ -217,7 +218,8 @@ class CasadiNMPC:
 
         xi_0 = build_xi_full(mmg_state, delta, n, chi_p, x_d, y_d)  # current state -> initial-state constraint
         obs_flat = pad_obstacles(obstacles, self.n_obs)
-        p_val = np.concatenate([xi_0, [chi_p, x_d, y_d], obs_flat])  # matches _param_layout() order
+        u_ref_eff = compute_effective_u_ref(mmg_state[3], mmg_state[4], x_d, y_d, self.config.U_REF, self.config)
+        p_val = np.concatenate([xi_0, [chi_p, x_d, y_d, u_ref_eff], obs_flat])  # matches _param_layout() order
         z0 = self._initial_guess(xi_0)
 
         t0 = time.perf_counter()

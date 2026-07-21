@@ -60,6 +60,20 @@ def compute_course_error(chi, chi_p) -> float:
     return wrap_to_pi(chi - chi_p)
 
 
+def compute_effective_u_ref(x, y, x_d, y_d, U_ref, config=DEFAULT_CONFIG) -> float:
+    """Linear braking ramp: full U_ref outside config.BRAKE_DISTANCE, ramping down
+    to config.U_REF_MIN right at the target. Recomputed fresh every solve() call
+    from the ship's true current distance to the active target (x_d, y_d) — this
+    is what actually produces deceleration near arrival, since Q[x]/Q[y] (meters^2)
+    dwarfs Q[u] ((m/s)^2) at any real distance, so a constant U_ref never gets
+    "discovered" as needing to shrink by the cost weights alone."""
+    dist = float(np.hypot(x - x_d, y - y_d))
+    if dist >= config.BRAKE_DISTANCE:
+        return float(U_ref)
+    frac = dist / config.BRAKE_DISTANCE
+    return float(config.U_REF_MIN + frac * (U_ref - config.U_REF_MIN))
+
+
 def get_reference_state(chi_p, x_d, y_d, U_ref, delta_trim=None, n_trim=None,
                          config=DEFAULT_CONFIG) -> np.ndarray:
     """Builds xi_ref: zero error, desired heading = chi_p, desired speed = U_ref."""

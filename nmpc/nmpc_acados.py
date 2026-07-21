@@ -34,7 +34,7 @@ from nmpc.config import (
 )
 from nmpc.state_augmentation import augmented_dynamics_casadi
 from nmpc.path_following import (
-    build_xi_full, pad_obstacles, get_reference_state, wrap180_casadi,
+    build_xi_full, pad_obstacles, get_reference_state, wrap180_casadi, compute_effective_u_ref,
 )
 
 
@@ -199,7 +199,8 @@ class AcadosNMPC:
         obs_flat = pad_obstacles(obstacles, self.n_obs)
         params = np.concatenate([[chi_p, x_d, y_d], obs_flat])  # matches _param_vector() order
 
-        xi_ref = get_reference_state(chi_p, x_d, y_d, cfg.U_REF, cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
+        u_ref_eff = compute_effective_u_ref(mmg_state[3], mmg_state[4], x_d, y_d, cfg.U_REF, cfg)
+        xi_ref = get_reference_state(chi_p, x_d, y_d, u_ref_eff, cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
         xi_ref = _yref_wrap_psi(xi_ref)  # psi row target is 0 (wrapped residual baked into cost_y_expr)
         yref = np.concatenate([xi_ref, np.zeros(CONTROL_DIM)])
 

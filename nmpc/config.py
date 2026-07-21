@@ -77,6 +77,19 @@ class NMPCConfig:
     # ---------------- Waypoint switching ----------------
     WP_RADIUS: float = 1.0      # switch to next waypoint when within this distance [m]
 
+    # ---------------- Speed-reference braking ramp ----------------
+    # Q[x]/Q[y] (position error, meters^2) dwarfs Q[u] (speed error, (m/s)^2) at any
+    # real distance from the target, so a constant U_REF never gets "slowed down" by
+    # the optimizer on its own -- it keeps chasing U_REF at full weight-imbalance
+    # speed right up until it's almost on top of the target, then can't decelerate
+    # in time (RPS_DOT_MIN) and overshoots. Fix: shrink the SPEED REFERENCE itself
+    # as distance-to-target shrinks (see compute_effective_u_ref in path_following.py),
+    # instead of relying on the cost weights to discover braking near arrival.
+    BRAKE_DISTANCE: float = 8.0  # [m] start ramping U_ref down within this range of the target
+    U_REF_MIN: float = 0.05      # [m/s] floor speed at zero distance -- kept nonzero to stay
+                                  # clear of the u,v->0 singularity in casadi_mmg.py's U=sqrt(u^2+v^2)
+                                  # denominator (v_ndm, r_ndm blow up as U->0)
+
     # ---------------- Numerical safety ----------------
     EPS: float = 1e-6           # generic numerical-safety guard (small-denominator clamps etc)
 
@@ -91,10 +104,9 @@ class NMPCConfig:
     # NOTE: paper's own starting value has e_y weight = 0, which leaves cross-track
     # error unpenalized (heading aligns with the path but never nulls the offset).
     # Bumped to a small non-zero value (5.0) purely for closed-loop stability during
-    # the first open-loop test run - all 4 tests failed with the paper's e_y=0 value,
-    # since the optimizer had zero incentive to null a constant cross-track offset.
-    Q_DIAG: tuple = (5.0, 2.0, 2.0, 0.5, 0.0, 0.0, 30.0, 0.0, 0.0, 0.001, 0.001)
-    R_DIAG: tuple = (0.001, 0.001)          # penalizes [delta_dot, n_dot]
+
+    Q_DIAG: tuple = (20.0, 2.0, 2.0, 0.5, 5.0, 5.0, 30.0, 1000.0, 5.0, 0.001, 0.001)
+    R_DIAG: tuple = (0.01, 0.01)          # penalizes [delta_dot, n_dot]
     QE_SCALE: float = 2.0                   # terminal cost = QE_SCALE * stage cost (standard choice)
 
     # ---------------- IPOPT (CasADi debug solver) ----------------
