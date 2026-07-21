@@ -3,13 +3,62 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.patches import Circle, Polygon
 from mpc_bridge import MPCBridge
+import csv
+import json
+import os
+from datetime import datetime
 
 class MPCVisualizer:
-    def __init__(self, bridge: MPCBridge, update_interval_ms: int = 50, run_name: str = "mpc_run"):
+    def __init__(self, bridge: MPCBridge, update_interval_ms: int = 50, run_name: str = "mpc_run", log_dir: str = None, enable_logging: bool = True):
         self.bridge = bridge
         self.update_interval = update_interval_ms
         self.is_running = True
         self.run_name = run_name
+        self.enable_logging = enable_logging
+        self.last_logged_timestamp = None
+        self.csv_file = None
+        self.csv_writer = None
+
+        if log_dir is None:
+            # Default to mpc_visualization/logs relative to this file
+            self.log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        else:
+            self.log_dir = log_dir
+
+        if self.enable_logging:
+            os.makedirs(self.log_dir, exist_ok=True)
+            now_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{self.run_name}_{now_str}.csv"
+            self.log_filepath = os.path.join(self.log_dir, filename)
+
+            try:
+                self.csv_file = open(self.log_filepath, mode='w', newline='', encoding='utf-8')
+                self.csv_writer = csv.writer(self.csv_file)
+                # Write CSV Header
+                self.csv_writer.writerow([
+                    "Date_Time",
+                    "Run_Name",
+                    "Timestamp_s",
+                    "u_m_s",
+                    "v_m_s",
+                    "r_rad_s",
+                    "x_m",
+                    "y_m",
+                    "psi_rad",
+                    "psi_deg",
+                    "start_x",
+                    "start_y",
+                    "goal_x",
+                    "goal_y",
+                    "predicted_trajectory",
+                    "control_horizon",
+                    "obstacles"
+                ])
+                self.csv_file.flush()
+                print(f"[MPCVisualizer] Live logging initialized. CSV file created at: {self.log_filepath}")
+            except Exception as e:
+                print(f"[MPCVisualizer] Failed to initialize CSV logging: {e}")
+                self.enable_logging = False
 
         # Setup Figure and Subplots
         # 1-row, 2-column layout: Left for the Map, Right for the Control Horizon
@@ -68,7 +117,21 @@ class MPCVisualizer:
 
     def on_close(self, event):
         self.is_running = False
+        if self.csv_file:
+            try:
+                self.csv_file.close()
+                print(f"[MPCVisualizer] Log file closed cleanly: {self.log_filepath}")
+            except Exception as e:
+                print(f"[MPCVisualizer] Error closing log file: {e}")
         print("Visualizer window closed. Exiting sim...")
+
+    def __del__(self):
+        if hasattr(self, 'csv_file') and self.csv_file:
+            try:
+                self.csv_file.close()
+            except Exception:
+                pass
+
 
     def draw_ship_polygon(self, x, y, psi):
         """
@@ -168,6 +231,60 @@ class MPCVisualizer:
             rps_curr = snap.control_horizon[0, 1]
         else:
             delta_curr, rps_curr = 0.0, 0.0
+
+        # Live CSV Logging
+        if self.enable_logging and self.csv_writer:
+            if self.last_logged_timestamp is None or snap.timestamp != self.last_logged_timestamp:
+                self.last_logged_timestamp = snap.timestamp
+
+                wall_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+                try:
+                    pred_traj_list = snap.predicted_trajectory.tolist()
+                except Exception:
+                    pred_traj_list = []
+
+                try:
+                    ctrl_horiz_list = snap.control_horizon.tolist()
+                except Exception:
+                    ctrl_horiz_list = []
+
+                obstacles_list = [
+                    {
+                        "id": obs.id,
+                        "x": float(obs.x),
+                        "y": float(obs.y),
+                        "radius": float(obs.radius),
+                        "static": bool(obs.static)
+                    }
+                    for obs in snap.obstacles
+                ]
+
+                row = [
+                    wall_time_str,
+                    self.run_name,
+                    f"{snap.timestamp:.3f}",
+                    f"{u:.6f}",
+                    f"{v:.6f}",
+                    f"{r:.6f}",
+                    f"{x:.6f}",
+                    f"{y:.6f}",
+                    f"{psi:.6f}",
+                    f"{np.rad2deg(psi):.3f}",
+                    f"{snap.start[0]:.6f}",
+                    f"{snap.start[1]:.6f}",
+                    f"{snap.goal[0]:.6f}",
+                    f"{snap.goal[1]:.6f}",
+                    json.dumps(pred_traj_list),
+                    json.dumps(ctrl_horiz_list),
+                    json.dumps(obstacles_list)
+                ]
+
+                try:
+                    self.csv_writer.writerow(row)
+                    self.csv_file.flush()
+                except Exception as e:
+                    print(f"[MPCVisualizer] Error writing to CSV: {e}")
 
         # Update telemetry overlay
         text = (
