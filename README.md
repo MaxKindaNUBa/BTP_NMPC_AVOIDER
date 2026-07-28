@@ -337,6 +337,7 @@ validation_comparison.png    ...its output plot
 casadi_mmg_solver/           CasADi symbolic MMG port + acados SimSolver
 mpc_visualization/           Standalone live-visualization dashboard
 research_papers/             Citations for the papers the NMPC is adapted from
+scenario_maker/              GUI for authoring custom track & obstacle scenarios
 nmpc/                        The actual NMPC controller (both solvers)
 
 c_generated_code_sim_exact/  Acados-generated C code (gitignored, auto-rebuilt)
@@ -365,10 +366,13 @@ python casadi_mmg_solver/casadi_mmg.py
 # 4. Exercise the visualization dashboard with mock data
 python mpc_visualization/run_demo.py
 
-# 5. Run the NMPC validation suite (produces nmpc/results/*.png)
+# 5. Build/edit a custom scenario layout with start, waypoints, goal, and obstacles
+python scenario_maker/scenario_editor.py
+
+# 6. Run the NMPC validation suite (produces nmpc/results/*.png)
 python -m nmpc.test_nmpc
 
-# 6. Watch an NMPC scenario live
+# 7. Watch an NMPC scenario live (including the scenario loaded from the maker)
 python nmpc/run_live.py --solver acados --scenario scenario_maker/scenario.json
 ```
 
