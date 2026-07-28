@@ -15,10 +15,10 @@ debugging, Acados/SQP-RTI for anything close to real time.
 | `state_augmentation.py` | The CasADi symbolic augmented-state ODE (`augmented_dynamics_casadi`) wrapping `casadi_mmg_solver`'s MMG dynamics with the new guidance/actuator-rate rows, plus an RK4 step and a validation harness against the raw MMG model. |
 | `nmpc_casadi.py` | **Step A** — `CasadiNMPC`, a full multiple-shooting NLP solved with IPOPT. Slow, but every intermediate value is inspectable — this is where the formulation itself gets debugged. |
 | `nmpc_acados.py` | **Step B** — `AcadosNMPC`, the same formulation compiled to a real-time SQP-RTI OCP via acados. This is the one meant to actually run in a control loop. |
-| `test_nmpc_open_loop.py` | Closed-loop validation harness (plant + solver, no obstacles) — 4 scenarios, results plotted to `results/`. |
-| `run_live_open_loop.py` | Same rollouts as above, but streamed live into `mpc_visualization/`'s dashboard instead of saved as static plots. |
-| `compare_qu.py` | Ad-hoc diagnostic script comparing `Q[u]=0` vs the tuned weight on an open-loop run. |
-| `results/` | Output plots from `test_nmpc_open_loop.py`. |
+| `test_nmpc.py` | Closed-loop validation harness (plant + solver, no obstacles) — 4 scenarios, results plotted to `results/`. |
+| `run_live.py` | Same rollouts as above, but streamed live into `mpc_visualization/`'s dashboard instead of saved as static plots. |
+| `compare_qu.py` | Ad-hoc diagnostic script comparing `Q[u]=0` vs the tuned weight. |
+| `results/` | Output plots from `test_nmpc.py`. |
 
 ## The augmented state
 
@@ -125,14 +125,14 @@ respect.
 python nmpc/path_following.py
 python nmpc/state_augmentation.py
 
-# Static-plot open-loop validation (4 scenarios, results/*.png)
-python -m nmpc.test_nmpc_open_loop
+# Static-plot validation (4 scenarios, results/*.png)
+python -m nmpc.test_nmpc
 
-# Live-visualized open-loop run
-python nmpc/run_live_open_loop.py --solver acados --test 3
+# Live-visualized run
+python nmpc/run_live.py --solver acados --scenario scenario_maker/scenario.json
 ```
 
 ## Dependencies
 
 `numpy`, `casadi`, `acados_template` (for `nmpc_acados.py` and
-`run_live_open_loop.py`'s default solver), `matplotlib` (test/demo plotting).
+`run_live.py`'s default solver), `matplotlib` (test/demo plotting).

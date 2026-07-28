@@ -3,8 +3,8 @@ Phase 2 validation harness — closed-loop simulation with NO obstacles.
 Drives the true (numeric) MMG plant with the NMPC's optimal first control
 action each step, exactly as an outer control loop would in deployment.
 
-Run: python -m nmpc.test_nmpc_open_loop
-   or: python nmpc/test_nmpc_open_loop.py  (from anywhere, thanks to the sys.path fix below)
+Run: python -m nmpc.test_nmpc
+   or: python nmpc/test_nmpc.py  (from anywhere, thanks to the sys.path fix below)
 """
 import os
 import sys
@@ -15,7 +15,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# allow running this file directly (python nmpc/test_nmpc_open_loop.py) by putting
+# allow running this file directly (python nmpc/test_nmpc.py) by putting
 # the repo root on sys.path, so `casadi_mmg_solver` and `nmpc` resolve as packages
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -220,7 +220,7 @@ def main(nmpc_solver=None, config=DEFAULT_CONFIG, solver_name="AcadosNMPC"):
         from nmpc.nmpc_acados import AcadosNMPC
         nmpc_solver = AcadosNMPC(config)
 
-    print(f"\n=========== Open-loop NMPC validation: {solver_name} ===========\n")
+    print(f"\n=========== NMPC validation: {solver_name} ===========\n")
 
     results = {}
     log1, ok1 = test1_straight_aligned(nmpc_solver, config)

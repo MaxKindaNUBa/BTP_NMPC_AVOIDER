@@ -42,7 +42,7 @@ standalone fast simulator for the closed-loop plant in every test/demo.
   Acados `AcadosSimSolver`: the same dynamics, but code-generated to C and
   compiled to a shared library (`libacados_sim_solver_vessel_mmg_acados_*.so`),
   for near-native execution speed instead of paying Python/CasADi
-  interpreter overhead on every step. This is what `nmpc/run_live_open_loop.py`
+  interpreter overhead on every step. This is what `nmpc/run_live.py`
   and the closed-loop test harnesses actually step the "real" plant with.
   Generated C code lands in `c_generated_code_sim_exact/` or
   `c_generated_code_sim_smooth/` (both gitignored — they're rebuilt

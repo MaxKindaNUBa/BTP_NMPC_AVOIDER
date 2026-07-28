@@ -50,7 +50,7 @@ class NMPCConfig:
     """All tunable NMPC parameters. Override via NMPCConfig(field=value, ...)."""
 
     # ---------------- Horizon parameters ----------------
-    N: int = 100                 # prediction horizon steps
+    N: int = 200                 # prediction horizon steps
     dt: float = 0.1             # sampling time [s]
 
     # ---------------- Ship geometry ----------------

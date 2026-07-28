@@ -1,6 +1,6 @@
-"""Ad-hoc diagnostic: Q_DIAG[IDX_U]=0.0 (old) vs current weight, open-loop.
+"""Ad-hoc diagnostic: Q_DIAG[IDX_U]=0.0 (old) vs current weight, in simulation.
 Uses CasadiNMPC (fast to rebuild per-config vs acados' C recompile).
-Same waypoints/initial condition as test1_straight_aligned in test_nmpc_open_loop.py.
+Same waypoints/initial condition as test1_straight_aligned in test_nmpc.py.
 
 Run: python nmpc/compare_qu.py
 """
@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from nmpc.config import DEFAULT_CONFIG, IDX_U
 from nmpc.nmpc_casadi import CasadiNMPC
-from nmpc.test_nmpc_open_loop import run_scenario
+from nmpc.test_nmpc import run_scenario
 
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
 

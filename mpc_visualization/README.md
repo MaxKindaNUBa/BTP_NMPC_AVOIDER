@@ -51,7 +51,7 @@ heading rendering, and both plots update correctly before wiring in a real
 solver. Close the window to stop the background thread cleanly.
 
 The real NMPC solvers are wired into this same dashboard by
-`nmpc/run_live_open_loop.py`, which imports `MPCBridge`/`MPCVisualizer`
+`nmpc/run_live.py`, which imports `MPCBridge`/`MPCVisualizer`
 directly (see `nmpc/README.md`) instead of duplicating any of this code.
 
 ## Dependencies

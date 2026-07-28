@@ -294,7 +294,7 @@ was reconstructed from those logs rather than invented. The short version:
 5. The `nmpc/` package was built in dependency order — config, guidance
    geometry, augmented dynamics, then the CasADi solver, then the acados
    solver.
-6. **First open-loop test run: total failure.** All four validation
+6. **First NMPC test run: total failure.** All four validation
    scenarios failed with multi-meter cross-track error. Root cause: the
    reference paper's own published cross-track weight is `0` (their
    formulation relies on heading-alignment alone), copied verbatim into
@@ -365,11 +365,11 @@ python casadi_mmg_solver/casadi_mmg.py
 # 4. Exercise the visualization dashboard with mock data
 python mpc_visualization/run_demo.py
 
-# 5. Run the NMPC open-loop validation suite (produces nmpc/results/*.png)
-python -m nmpc.test_nmpc_open_loop
+# 5. Run the NMPC validation suite (produces nmpc/results/*.png)
+python -m nmpc.test_nmpc
 
 # 6. Watch an NMPC scenario live
-python nmpc/run_live_open_loop.py --solver acados --test 3
+python nmpc/run_live.py --solver acados --scenario scenario_maker/scenario.json
 ```
 
 `ACADOS_SOURCE_DIR` is currently hardcoded to `/home/chandran/acados` in a
