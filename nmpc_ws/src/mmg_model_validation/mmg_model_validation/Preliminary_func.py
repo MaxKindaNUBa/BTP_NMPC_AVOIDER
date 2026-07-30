@@ -8,7 +8,11 @@ import matplotlib.pyplot as plt
 ############ Wave Data Import ################
 ##############################################
 
-wave_data_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Wave_Data') + '/'
+# Wave_Data/ (the raw .mat oceanographic data, unrelated to any of the moved
+# python codebases) stays where it is at the repo root -- not duplicated into
+# this package, same convention as acados' generated-code output staying
+# outside src/ (see nmpc_sim_nodes/_pkg_paths.py).
+wave_data_path = os.environ.get("NMPC_WAVE_DATA_DIR", "/mnt/0BF1C240574D9C37/BTP_NMPC_AVOIDER/Wave_Data") + '/'
 
 X_wave = np.array(scipy.io.loadmat(wave_data_path +"DX_SALV_REV1.mat")['DX'])
 Y_wave = np.array(scipy.io.loadmat(wave_data_path +"DY_SALV_REV1.mat")['DY'])

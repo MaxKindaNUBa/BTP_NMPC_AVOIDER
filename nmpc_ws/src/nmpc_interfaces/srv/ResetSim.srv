@@ -1,0 +1,4 @@
+VesselState new_initial_state
+bool use_default
+---
+bool success

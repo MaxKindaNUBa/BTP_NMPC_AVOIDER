@@ -28,7 +28,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 MODES = ["Start", "Waypoint", "Goal", "Obstacle", "Remove"]
-DEFAULT_OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scenario.json")
+DEFAULT_OUT = os.path.expanduser("~/nmpc_scenarios/scenario.json")
 
 
 class ScenarioEditor:
@@ -291,6 +291,7 @@ class ScenarioEditor:
             "sim_time": self.sim_time,
             "obstacles": [[round(o[0], 4), round(o[1], 4), round(o[2], 4)] for o in self.obstacles],
         }
+        os.makedirs(os.path.dirname(os.path.abspath(self.out_path)), exist_ok=True)
         with open(self.out_path, "w") as f:
             json.dump(data, f, indent=2)
         self._flash(f"Saved {len(full_path)} waypoints, {len(self.obstacles)} obstacles -> {self.out_path}")

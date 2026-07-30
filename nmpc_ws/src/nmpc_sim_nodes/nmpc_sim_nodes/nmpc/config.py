@@ -55,7 +55,7 @@ class NMPCConfig:
 
     # ---------------- Ship geometry ----------------
     LPP: float = 2.902          # length between perpendiculars [m]
-    R_ASV_FACTOR: float = 0.5   # collision radius = R_ASV_FACTOR * LPP
+    R_ASV_FACTOR: float = 0.7   # collision radius = R_ASV_FACTOR * LPP
     R_ASV: float = field(init=False)  # derived in __post_init__, not settable directly
 
     # ---------------- Actuator bounds ----------------
@@ -75,7 +75,15 @@ class NMPCConfig:
     N_TRIM: float = 10.0        # trim propeller speed [rps] (roughly consistent with U_REF)
 
     # ---------------- Waypoint switching ----------------
-    WP_RADIUS: float = 1.0      # switch to next waypoint when within this distance [m]
+    WP_RADIUS: float = 2.0      # switch to next waypoint when within this distance [m]
+
+    # ---------------- Simulation duration (run_live.py) ----------------
+    # SIM_TIME_MODE selects how the live rollout decides when to stop:
+    #   "infinite" - never stops on its own; runs until the visualizer window is closed.
+    #   "fixed"    - runs for exactly SIM_TIME_FIXED seconds (below), then stops.
+    #   "endpoint" - runs until the ship reaches the final waypoint (within WP_RADIUS).
+    SIM_TIME_MODE: str = "endpoint"
+    SIM_TIME_FIXED: float = 300.0   # [s] wall/sim time used only when SIM_TIME_MODE == "fixed"
 
     # ---------------- Speed-reference braking ramp ----------------
     # Q[x]/Q[y] (position error, meters^2) dwarfs Q[u] (speed error, (m/s)^2) at any
@@ -105,7 +113,7 @@ class NMPCConfig:
     # error unpenalized (heading aligns with the path but never nulls the offset).
     # Bumped to a small non-zero value (5.0) purely for closed-loop stability during
 
-    Q_DIAG: tuple = (20.0, 2.0, 2.0, 0.5, 5.0, 5.0, 30.0, 1000.0, 5.0, 0.001, 0.001)
+    Q_DIAG: tuple = (10.0, 2.0, 2.0, 0.5, 5.0, 5.0, 30.0, 100.0, 5.0, 0.001, 0.001)
     R_DIAG: tuple = (0.01, 0.01)          # penalizes [delta_dot, n_dot]
     QE_SCALE: float = 2.0                   # terminal cost = QE_SCALE * stage cost (standard choice)
 
