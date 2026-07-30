@@ -1,0 +1,81 @@
+# Single shared source for dt, N, weights, bounds, etc. (ROS2_CONVERSION_PLAN.md
+# section 4/6). Values below mirror nmpc/config.py's NMPCConfig defaults exactly,
+# except MAX_OBSTACLES, which is bumped from its 5-obstacle default to 20 to
+# match scenario_maker/scenario.json's actual obstacle count -- nmpc_node's OCP
+# obstacle-slot count is fixed at construction time, so this must be >= whatever
+# scenario is launched (pad_obstacles() truncates silently if it's too small).
+#
+# dt (mmg_node/nmpc_node) and MAX_OBSTACLES (nmpc_node/map_node) must be kept
+# numerically identical wherever they're repeated below. YAML anchors/aliases
+# would let each have one literal source, but ROS2's own params-file parser
+# (rcl_yaml_param_parser, a restricted C YAML implementation) rejects aliases
+# outright ("Will not support aliasing") -- confirmed by trying it against this
+# exact file. So these are plain duplicated literals; section 7's validation
+# run explicitly checks both nodes' *resolved* dt match via `ros2 param get`,
+# per section 2.7's note that this drift is "the most likely silent bug in
+# this migration."
+
+mmg_node:
+  ros__parameters:
+    dt: 0.1
+
+nmpc_node:
+  ros__parameters:
+    solver_backend: "acados"   # or "casadi"
+
+    N: 200
+    dt: 0.1   # MUST match mmg_node.dt above
+    LPP: 2.902
+    R_ASV_FACTOR: 0.5
+
+    DELTA_MIN: -0.7853981633974483    # -45 deg [rad]
+    DELTA_MAX: 0.7853981633974483     # +45 deg [rad]
+    DELTA_DOT_MIN: -0.5235987755982988  # -30 deg/s [rad/s]
+    DELTA_DOT_MAX: 0.5235987755982988   # +30 deg/s [rad/s]
+
+    RPS_MIN: -18.2
+    RPS_MAX: 18.2
+    RPS_DOT_MIN: -5.0
+    RPS_DOT_MAX: 5.0
+
+    U_REF: 0.70
+    DELTA_TRIM: 0.0
+    N_TRIM: 10.0
+
+    BRAKE_DISTANCE: 8.0
+    U_REF_MIN: 0.05
+
+    EPS: 1.0e-6
+
+    SIGMA: 0.2
+    W_SLACK: 50.0
+    OBSTACLE_START_K: 1
+    MAX_OBSTACLES: 20   # MUST be >= map_node.max_obstacles below
+
+    Q_DIAG: [10.0, 2.0, 2.0, 0.5, 5.0, 5.0, 30.0, 100.0, 5.0, 0.001, 0.001]
+    R_DIAG: [0.01, 0.01]
+    QE_SCALE: 2.0
+
+    IPOPT_MAX_ITER: 200
+    IPOPT_TOL: 1.0e-6
+    IPOPT_PRINT_LEVEL: 0
+
+    ACADOS_QP_SOLVER: "PARTIAL_CONDENSING_HPIPM"
+    ACADOS_NLP_SOLVER: "SQP_RTI"
+    ACADOS_INTEGRATOR: "ERK"
+    ACADOS_NUM_STAGES: 4
+    ACADOS_NUM_STEPS: 1
+    # ACADOS_CODE_EXPORT_DIR / ACADOS_JSON_FILE intentionally omitted: nmpc_node
+    # defaults them to ~/.ros/nmpc_sim_nodes/acados_generated/ (see _pkg_paths.py),
+    # which avoids the cwd-dependent packaging gotcha noted in plan section 2.6.
+
+map_node:
+  ros__parameters:
+    # scenario_path intentionally omitted: map_node defaults it to the
+    # scenario.json installed alongside this file (share/nmpc_sim_nodes/params/),
+    # resolved via ament_index_python -- not a repo-relative path. Override here
+    # with an absolute path to use a different scenario.
+    wp_radius: 2.0
+    sim_time_mode: "endpoint"   # "infinite" | "fixed" | "endpoint"
+    sim_time_fixed: 300.0
+    max_obstacles: 20   # MUST match nmpc_node.MAX_OBSTACLES above

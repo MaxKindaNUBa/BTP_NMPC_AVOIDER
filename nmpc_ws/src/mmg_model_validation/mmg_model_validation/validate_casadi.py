@@ -21,19 +21,18 @@ if os.path.exists(acados_lib_dir):
 
 import numpy as np
 import casadi as ca
-import sys
 import matplotlib.pyplot as plt
 
-
-# Ensure repository root is in path
-repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__)))
-sys.path.append(repo_root)
-
 # Import original NumPy implementation
-from Preliminary_func import activateMMG
+from .Preliminary_func import activateMMG
 
-# Import CasADi implementation
-from casadi_mmg_solver.casadi_mmg import make_acados_integrator
+# Import CasADi implementation -- casadi_mmg_solver now lives inside nmpc_sim_nodes
+# (see ROS2_CONVERSION_PLAN.md's "true move" of the legacy Python codebases),
+# so this is a cross-package import; mmg_model_validation's package.xml
+# declares a runtime dependency on nmpc_sim_nodes for exactly this.
+from nmpc_sim_nodes.casadi_mmg_solver.casadi_mmg import make_acados_integrator
+
+OUTPUT_DIR = os.path.expanduser("~/nmpc_sim_logs")
 
 def run_validation(sim_time=200.0, dt=0.05, smooth=True):
     time_steps = np.arange(0, sim_time, dt)
@@ -92,13 +91,19 @@ def run_validation(sim_time=200.0, dt=0.05, smooth=True):
     plt.ylabel('r (rad/s)')
     plt.legend()
     plt.tight_layout()
-    out_path = os.path.join(repo_root, 'validation_comparison.png')
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    out_path = os.path.join(OUTPUT_DIR, 'validation_comparison.png')
     plt.savefig(out_path)
     print(f'Plot saved to {out_path}')
 
-if __name__ == '__main__':
+
+def main():
     print("--- RUNNING VALIDATION WITH SMOOTH=TRUE ---")
     run_validation(smooth=True)
     print("\n--- RUNNING VALIDATION WITH SMOOTH=FALSE ---")
     run_validation(smooth=False)
+
+
+if __name__ == '__main__':
+    main()
 

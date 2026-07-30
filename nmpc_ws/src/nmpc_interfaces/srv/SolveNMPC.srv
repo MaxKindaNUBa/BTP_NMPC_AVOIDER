@@ -1,0 +1,7 @@
+VesselState state
+---
+ControlCommand command
+PredictionHorizon horizon
+bool success
+string return_status
+float64 solve_time

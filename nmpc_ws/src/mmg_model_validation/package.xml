@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mmg_model_validation</name>
+  <version>0.1.0</version>
+  <description>Standalone NumPy-vs-CasADi MMG dynamics cross-validation tool. Not part of the ROS2 node graph; depends on nmpc_sim_nodes only to reuse its casadi_mmg_solver subpackage.</description>
+  <maintainer email="intern@umagine.co.in">intern</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>nmpc_sim_nodes</depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

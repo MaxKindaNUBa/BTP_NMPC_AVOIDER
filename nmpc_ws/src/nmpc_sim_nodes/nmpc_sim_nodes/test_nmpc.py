@@ -3,11 +3,9 @@ Phase 2 validation harness — closed-loop simulation with NO obstacles.
 Drives the true (numeric) MMG plant with the NMPC's optimal first control
 action each step, exactly as an outer control loop would in deployment.
 
-Run: python -m nmpc.test_nmpc
-   or: python nmpc/test_nmpc.py  (from anywhere, thanks to the sys.path fix below)
+Run: ros2 run nmpc_sim_nodes test_nmpc
 """
 import os
-import sys
 import time
 import numpy as np
 import casadi as ca
@@ -15,18 +13,18 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-# allow running this file directly (python nmpc/test_nmpc.py) by putting
-# the repo root on sys.path, so `casadi_mmg_solver` and `nmpc` resolve as packages
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+from . import _pkg_paths
 
-from casadi_mmg_solver.casadi_mmg import make_casadi_integrator
-from nmpc.config import DEFAULT_CONFIG
-from nmpc.path_following import (
+_pkg_paths.ensure_on_path()
+
+from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
+from nmpc.config import DEFAULT_CONFIG  # noqa: E402
+from nmpc.path_following import (  # noqa: E402
     compute_path_angle, compute_cross_track_error, compute_sideslip,
     compute_course_angle, compute_course_error, select_active_waypoint,
 )
 
-RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_nmpc_results")
 
 
 def run_scenario(nmpc_solver, waypoints, mmg_init, sim_time, config=DEFAULT_CONFIG,

@@ -1,8 +1,13 @@
 import time
 import threading
 import numpy as np
-from mpc_bridge import MPCBridge, Obstacle
-from visualizer import MPCVisualizer
+
+from . import _pkg_paths
+
+_pkg_paths.ensure_on_path()
+
+from mpc_bridge import MPCBridge, Obstacle  # noqa: E402
+from visualizer import MPCVisualizer  # noqa: E402
 
 def run_mock_simulation(bridge: MPCBridge, sim_speed_factor: float = 2.0):
     """
