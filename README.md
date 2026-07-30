@@ -8,7 +8,8 @@ repository documents the whole path from "here is a MATLAB-derived NumPy
 dynamics model" to "here is a working closed-loop NMPC controller," including
 every bug that showed up along the way and how it was diagnosed and fixed.
 
-If you only read one other file, read [`nmpc/README.md`](nmpc/README.md) —
+If you only read one other file, read
+[`nmpc/README.md`](nmpc_ws/src/nmpc_sim_nodes/nmpc_sim_nodes/nmpc/README.md) —
 it documents the actual controller and its full bug history in detail. This
 file is the narrative/overview: what the project does, why it's built this
 way, where the ideas came from, and how the pieces fit together.
@@ -240,7 +241,9 @@ augmented state here has `delta`/`n` rows instead of two thruster forces.
 ## The NMPC formulation
 
 Full detail (including every parameter and every bug fixed while getting
-here) is in [`nmpc/README.md`](nmpc/README.md). Summary:
+here) is in
+[`nmpc/README.md`](nmpc_ws/src/nmpc_sim_nodes/nmpc_sim_nodes/nmpc/README.md).
+Summary:
 
 **Augmented state** (11-dimensional):
 ```
@@ -323,62 +326,80 @@ was reconstructed from those logs rather than invented. The short version:
 A **known, currently-open issue** (a low-speed singularity in the MMG
 model's `U = sqrt(u² + v²)` denominator, which can freeze acados' solver
 during a slow pivot near a target) is documented in
-[`nmpc/README.md`](nmpc/README.md) rather than silently left for someone to
-rediscover.
+[`nmpc/README.md`](nmpc_ws/src/nmpc_sim_nodes/nmpc_sim_nodes/nmpc/README.md)
+rather than silently left for someone to rediscover.
 
 ## Repository layout
 
+Everything that runs now lives inside a ROS2 (Jazzy) workspace,
+`nmpc_ws/`, built with `colcon` and made up of several `ament_python`
+packages (see [`ROS2_CONVERSION_PLAN.md`](ROS2_CONVERSION_PLAN.md) for the
+restructuring this followed):
+
 ```
-Preliminary_func.py          NumPy MMG dynamics model (ground truth)
-Wave_Data/                   Wave-drift force lookup tables (.mat)
-validate_casadi.py           NumPy vs CasADi vs acados validation harness
-validation_comparison.png    ...its output plot
+nmpc_ws/
+  src/
+    nmpc_interfaces/            Shared msg/srv definitions for the sim's ROS2 node graph
+    nmpc_sim_nodes/              map_node, nmpc_node, mmg_node -- the simulation graph --
+                                  plus viz_node / rviz_node (independently launchable live
+                                  visualizers) and run_demo / test_nmpc executables. Also
+                                  contains the actual controller/model code, physically
+                                  moved in here as subpackages:
+      nmpc_sim_nodes/nmpc/                    The NMPC controller (both solvers) -- see
+                                                its own README, linked above
+      nmpc_sim_nodes/casadi_mmg_solver/       CasADi symbolic MMG port + acados SimSolver
+      nmpc_sim_nodes/mpc_visualization/       The matplotlib live-visualization dashboard
+    scenario_maker/               GUI for authoring custom track & obstacle scenarios
+    mmg_model_validation/         Standalone NumPy vs CasADi vs acados validation harness
+                                    (Preliminary_func.py, validate_casadi.py)
 
-casadi_mmg_solver/           CasADi symbolic MMG port + acados SimSolver
-mpc_visualization/           Standalone live-visualization dashboard
-research_papers/             Citations for the papers the NMPC is adapted from
-scenario_maker/              GUI for authoring custom track & obstacle scenarios
-nmpc/                        The actual NMPC controller (both solvers)
-
-c_generated_code_sim_exact/  Acados-generated C code (gitignored, auto-rebuilt)
-c_generated_code_sim_smooth/ Acados-generated C code (gitignored, auto-rebuilt)
+Wave_Data/                    Wave-drift force lookup tables (.mat)
+research_papers/              Citations for the papers the NMPC is adapted from
+ROS2_CONVERSION_PLAN.md       The plan the ROS2 restructuring above followed
 ```
 
-Every subdirectory has its own `README.md` with file-by-file detail; this
-top-level file is deliberately the narrative/overview instead of duplicating
-that detail.
+Every package/subpackage has its own `README.md` with file-by-file detail;
+this top-level file is deliberately the narrative/overview instead of
+duplicating that detail.
 
 ## Getting started
 
 ```bash
-# Environment: needs casadi, numpy, scipy, matplotlib, and acados_template
+# Environment: needs casadi, numpy, scipy, matplotlib, acados_template, and ROS2 Jazzy
 # (acados itself must be built separately: https://docs.acados.org)
 
-# 1. Sanity-check the baseline dynamics model + wave data load correctly
-python Preliminary_func.py    # (turning-circle test is commented out at the bottom)
+# 1. Build the workspace (re-run after any source change -- no --symlink-install)
+cd nmpc_ws && python3 -m colcon build
 
-# 2. Validate the CasADi/acados port against it
-python validate_casadi.py
+# 2. Source it (every new terminal, in this order)
+source /opt/ros/jazzy/setup.bash
+source nmpc_ws/install/setup.bash
 
-# 3. Run the CasADi MMG turning-circle demo standalone
-python casadi_mmg_solver/casadi_mmg.py
+# 3. Launch the simulation graph: map_node + nmpc_node + mmg_node
+ros2 launch nmpc_sim_nodes bringup.launch.py
 
-# 4. Exercise the visualization dashboard with mock data
-python mpc_visualization/run_demo.py
+# 4. Watch it live, in a separate terminal -- matplotlib dashboard...
+ros2 run nmpc_sim_nodes viz_node
+# ...or RViz2 (needs `unset GTK_PATH` first if it fails to launch -- see nmpc_sim_nodes'
+# rviz/ config for why):
+unset GTK_PATH && ros2 run rviz2 rviz2 -d $(ros2 pkg prefix nmpc_sim_nodes)/share/nmpc_sim_nodes/rviz/sim_view.rviz
+ros2 run nmpc_sim_nodes rviz_node
 
 # 5. Build/edit a custom scenario layout with start, waypoints, goal, and obstacles
-python scenario_maker/scenario_editor.py
+ros2 run scenario_maker scenario_editor
 
-# 6. Run the NMPC validation suite (produces nmpc/results/*.png)
-python -m nmpc.test_nmpc
+# 6. Run the NMPC validation suite (produces ~/nmpc_sim_logs/test_nmpc_results/*.png)
+ros2 run nmpc_sim_nodes test_nmpc
 
-# 7. Watch an NMPC scenario live (including the scenario loaded from the maker)
-python nmpc/run_live.py --solver acados --scenario scenario_maker/scenario.json
+# 7. Cross-validate NumPy vs CasADi vs acados MMG dynamics standalone
+ros2 run mmg_model_validation validate_casadi
 ```
 
 `ACADOS_SOURCE_DIR` is currently hardcoded to `/home/chandran/acados` in a
-few places (`casadi_mmg_solver/casadi_mmg.py`, `nmpc/nmpc_acados.py`) —
-update this if running on a different machine.
+few places (`nmpc_sim_nodes/casadi_mmg_solver/casadi_mmg.py`,
+`nmpc_sim_nodes/nmpc/nmpc_acados.py`,
+`mmg_model_validation/validate_casadi.py`) — update this if running on a
+different machine.
 
 ## Current status and open work
 
@@ -399,11 +420,16 @@ update this if running on a different machine.
 - The low-speed MMG singularity described above, which can freeze the
   acados solver during a slow pivot near a target.
 
+**Done since the original action plan:** the controller now runs as a ROS2
+(Jazzy) node graph (`nmpc_ws/` — see [Repository layout](#repository-layout)
+above), though still against the same simulated obstacles/state as before,
+not real sensors.
+
 **Not yet started** (per the original action plan, roughly in order):
 LiDAR-based (rather than hardcoded) obstacle detection and clustering, state
-estimation integration (EKF fusion of IMU/GPS), a ROS2 node wrapping the
-controller with safety fallbacks, and progressively more realistic
-hardware-in-the-loop / real-vessel testing.
+estimation integration (EKF fusion of IMU/GPS) and the safety fallbacks that
+would depend on it, and progressively more realistic hardware-in-the-loop /
+real-vessel testing.
 
 ## A note on how this repository's history was built
 
