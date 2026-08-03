@@ -27,9 +27,10 @@ way, where the ideas came from, and how the pieces fit together.
 7. [The NMPC formulation](#the-nmpc-formulation)
 8. [Development timeline and what actually went wrong](#development-timeline-and-what-actually-went-wrong)
 9. [Repository layout](#repository-layout)
-10. [Getting started](#getting-started)
-11. [Current status and open work](#current-status-and-open-work)
-12. [A note on how this repository's history was built](#a-note-on-how-this-repositorys-history-was-built)
+10. [Available executables](#available-executables)
+11. [Getting started](#getting-started)
+12. [Current status and open work](#current-status-and-open-work)
+13. [A note on how this repository's history was built](#a-note-on-how-this-repositorys-history-was-built)
 
 ---
 
@@ -114,8 +115,8 @@ a known-good reference, instead of being debugged blind.
                      ┌─────────────────────────┐
                      │        nmpc/               │   augmented-state NMPC:
                      │  config / path_following /  │   path-following +
-                     │  state_augmentation /       │   (planned) obstacle
-                     │  nmpc_casadi / nmpc_acados  │   avoidance, two solvers
+                     │  state_augmentation /       │   obstacle avoidance,
+                     │  nmpc_casadi / nmpc_acados  │   two solvers
                      └────────────┬─────────────┘
                                   │ streams live state/predictions to
                                   ▼
@@ -340,15 +341,19 @@ restructuring this followed):
 nmpc_ws/
   src/
     nmpc_interfaces/            Shared msg/srv definitions for the sim's ROS2 node graph
-    nmpc_sim_nodes/              map_node, nmpc_node, mmg_node -- the simulation graph --
-                                  plus viz_node / rviz_node (independently launchable live
-                                  visualizers) and run_demo / test_nmpc executables. Also
-                                  contains the actual controller/model code, physically
-                                  moved in here as subpackages:
+    nmpc_sim_nodes/              map_node, nmpc_node, mmg_node, sensor_node -- the
+                                  simulation graph -- plus viz_node / rviz_node
+                                  (independently launchable live visualizers) and
+                                  run_demo / test_nmpc / test_sensor_model /
+                                  test_closed_loop_noise executables. Also contains the
+                                  actual controller/model code, physically moved in here
+                                  as subpackages:
       nmpc_sim_nodes/nmpc/                    The NMPC controller (both solvers) -- see
                                                 its own README, linked above
       nmpc_sim_nodes/casadi_mmg_solver/       CasADi symbolic MMG port + acados SimSolver
       nmpc_sim_nodes/mpc_visualization/       The matplotlib live-visualization dashboard
+      nmpc_sim_nodes/sensor_model/            GPS/compass/gyro/actuator noise model used
+                                                by sensor_node -- see SENSOR_NOISE_MODEL.md
     scenario_maker/               GUI for authoring custom track & obstacle scenarios
     mmg_model_validation/         Standalone NumPy vs CasADi vs acados validation harness
                                     (Preliminary_func.py, validate_casadi.py)
@@ -356,11 +361,33 @@ nmpc_ws/
 Wave_Data/                    Wave-drift force lookup tables (.mat)
 research_papers/              Citations for the papers the NMPC is adapted from
 ROS2_CONVERSION_PLAN.md       The plan the ROS2 restructuring above followed
+SENSOR_NOISE_MODEL.md         Spec for sensor_node's noise model (signals, presets, config)
 ```
 
 Every package/subpackage has its own `README.md` with file-by-file detail;
 this top-level file is deliberately the narrative/overview instead of
 duplicating that detail.
+
+## Available executables
+
+Every `ros2 run <package> <executable>` currently defined in `nmpc_ws/src/`,
+kept in sync with each package's `setup.py` whenever an executable is
+added/removed/renamed:
+
+| Package | Executable | What it does |
+|---|---|---|
+| `nmpc_sim_nodes` | `map_node` | Owns scenario data, active-waypoint bookkeeping, and run-termination logic; part of the core sim graph. |
+| `nmpc_sim_nodes` | `nmpc_node` | Pure NMPC optimizer, serving `/nmpc/solve` (acados or CasADi backend); calls `/sensor/measure` on the incoming state before solving. |
+| `nmpc_sim_nodes` | `mmg_node` | Plant integrator and the master `1/dt` clock; drives the sim loop's timing by calling `/nmpc/solve` each tick. |
+| `nmpc_sim_nodes` | `sensor_node` | Toggleable GPS/compass/gyro/actuator noise model (see `SENSOR_NOISE_MODEL.md`), sitting between the true plant state and what `nmpc_node` solves against. Enabled by default (light preset). |
+| `nmpc_sim_nodes` | `viz_node` | Standalone live matplotlib dashboard; late-joins a running sim via `/map/get_scenario` + topics, independent of the map/nmpc/mmg nodes. |
+| `nmpc_sim_nodes` | `rviz_node` | Republishes the sim's own topics as `visualization_msgs/MarkerArray` so RViz2 can render the same simulation. |
+| `nmpc_sim_nodes` | `run_demo` | Standalone mock-data demo of the visualization dashboard (fake circular-motion ship, no real NMPC or sim node graph). |
+| `nmpc_sim_nodes` | `test_nmpc` | Closed-loop NMPC validation harness, no obstacles; produces plots under `~/nmpc_sim_logs/test_nmpc_results/`. |
+| `nmpc_sim_nodes` | `test_sensor_model` | Standalone true-vs-measured comparison for `sensor_node`'s noise model; no other node needs to be running. Produces plots/CSVs under `~/nmpc_sim_logs/test_sensor_model_results/`. |
+| `nmpc_sim_nodes` | `test_closed_loop_noise` | Standalone headless run of the full pipeline (acados NMPC + MMG plant integrator) on `scenario.json`, twice -- once with no noise, once with `sensor_node`'s light preset -- at accelerated (unthrottled) speed. Produces a path-comparison plot under `~/nmpc_sim_logs/test_closed_loop_noise_results/`. |
+| `scenario_maker` | `scenario_editor` | GUI for authoring custom start/waypoints/goal/obstacle scenarios, saved as `scenario.json`. |
+| `mmg_model_validation` | `validate_casadi` | Cross-validates NumPy vs CasADi vs acados MMG dynamics on the project's standard turning-circle maneuver. |
 
 ## Getting started
 
@@ -393,6 +420,15 @@ ros2 run nmpc_sim_nodes test_nmpc
 
 # 7. Cross-validate NumPy vs CasADi vs acados MMG dynamics standalone
 ros2 run mmg_model_validation validate_casadi
+
+# 8. Compare true vs sensor-noise-corrupted signals standalone (no other node needed;
+#    produces plots/CSVs under ~/nmpc_sim_logs/test_sensor_model_results/)
+ros2 run nmpc_sim_nodes test_sensor_model
+
+# 9. Run the full closed-loop pipeline headlessly, twice (no noise vs light noise),
+#    at accelerated (non-real-time) speed; saves a final path-comparison plot under
+#    ~/nmpc_sim_logs/test_closed_loop_noise_results/
+ros2 run nmpc_sim_nodes test_closed_loop_noise
 ```
 
 `ACADOS_SOURCE_DIR` is currently hardcoded to `/home/chandran/acados` in a
@@ -409,27 +445,40 @@ different machine.
   starts, and multi-waypoint turns, with a distance-scaled braking ramp for
   arrival behavior.
 - Live visualization + CSV telemetry logging for any scenario.
-
-**Formulated but not yet exercised with real obstacles:**
-- The soft obstacle-avoidance constraints exist in both solvers'
-  formulations and are tested with an empty obstacle list in every current
-  scenario, but haven't been run through an actual obstacle-avoidance test
-  case yet (the original action plan's Phase 3).
+- Obstacle avoidance exercised end-to-end against the scenario's obstacles
+  (not just an empty list), via `test_closed_loop_noise`'s headless full-pipeline
+  rollout.
+- A toggleable sensor noise model (`sensor_node`/`sensor_model`, see
+  [`SENSOR_NOISE_MODEL.md`](SENSOR_NOISE_MODEL.md)) sitting between the true
+  plant state and what the NMPC solves against — GPS/compass/gyro/actuator
+  noise, with standalone comparison harnesses (`test_sensor_model`,
+  `test_closed_loop_noise`) for viewing its effect with and without noise.
 
 **Known open bug:**
 - The low-speed MMG singularity described above, which can freeze the
   acados solver during a slow pivot near a target.
 
+**Known gap:** the NMPC currently reads `sensor_node`'s raw, unfiltered noisy
+measurement straight into the solver's initial-state constraint every tick,
+with no state estimator in between. This is fine at the light noise preset,
+but an earlier, noisier "heavy" preset (large enough that differentiated
+velocity noise routinely exceeded 50 m/s on a ~1 m/s vessel) made the acados
+SQP-RTI solver fail almost immediately and permanently (no warm-start reset on
+failure) — see `SENSOR_NOISE_MODEL.md` section 3.4's note. It was removed
+rather than worked around; a real state estimator (Kalman filter/EKF) between
+the sensor and the controller is the actual fix, and remains unimplemented.
+
 **Done since the original action plan:** the controller now runs as a ROS2
 (Jazzy) node graph (`nmpc_ws/` — see [Repository layout](#repository-layout)
-above), though still against the same simulated obstacles/state as before,
-not real sensors.
+above), and now sits behind a simulated noisy sensor layer rather than
+consuming the true plant state directly — though still simulated, not real
+hardware.
 
 **Not yet started** (per the original action plan, roughly in order):
 LiDAR-based (rather than hardcoded) obstacle detection and clustering, state
-estimation integration (EKF fusion of IMU/GPS) and the safety fallbacks that
-would depend on it, and progressively more realistic hardware-in-the-loop /
-real-vessel testing.
+estimation integration (EKF fusion of IMU/GPS, per the known gap above) and
+the safety fallbacks that would depend on it, and progressively more
+realistic hardware-in-the-loop / real-vessel testing.
 
 ## A note on how this repository's history was built
 
