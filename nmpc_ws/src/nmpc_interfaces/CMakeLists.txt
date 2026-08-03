@@ -21,6 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SolveNMPC.srv"
   "srv/GetScenario.srv"
   "srv/ResetSim.srv"
+  "srv/MeasureState.srv"
   DEPENDENCIES std_msgs
 )
 
