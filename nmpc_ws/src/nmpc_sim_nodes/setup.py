@@ -34,6 +34,7 @@ setup(
             'rviz_node = nmpc_sim_nodes.rviz_node:main',
             'run_demo = nmpc_sim_nodes.run_demo:main',
             'test_nmpc = nmpc_sim_nodes.test_nmpc:main',
+            'test_sensor_model = nmpc_sim_nodes.sensor_model.test_sensor_model:main',
         ],
     },
 )
