@@ -3,11 +3,21 @@
 the latest /map/active_reference and /map/obstacles for use inside the next
 solve() call; also broadcasts the same result on three topics for passive
 consumers (viz_node, diagnostics).
+
+Also acts as the client of /sensor/measure (SENSOR_NOISE_MODEL.md /
+ROS2_CONVERSION_PLAN.md section 8): before solving, the true VesselState
+carried in the request is passed through sensor_node, and the (possibly
+corrupted) result is what the solver actually sees -- so "the controller
+only ever sees corrupted measurements", never the plant's true state,
+regardless of whether sensor_node's noise is enabled or disabled.
 """
 import dataclasses
+import time
 
 import numpy as np
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
@@ -20,7 +30,7 @@ from nmpc.config import DEFAULT_CONFIG  # noqa: E402
 from nmpc_interfaces.msg import (  # noqa: E402
     ActiveReference, ControlCommand, ObstacleArray, PredictionHorizon, SolverStatus,
 )
-from nmpc_interfaces.srv import SolveNMPC  # noqa: E402
+from nmpc_interfaces.srv import MeasureState, SolveNMPC  # noqa: E402
 
 # matches map_node's /map/obstacles QoS (section 2.5: "transient-local, depth 1 -- latched")
 _OBSTACLES_QOS = QoSProfile(
@@ -95,7 +105,17 @@ class NmpcNode(Node):
         self.create_subscription(ActiveReference, '/map/active_reference', self._on_active_reference, _REFERENCE_QOS)
         self.create_subscription(ObstacleArray, '/map/obstacles', self._on_obstacles, _OBSTACLES_QOS)
 
-        self.create_service(SolveNMPC, '/nmpc/solve', self._handle_solve)
+        # Same nested-service-call shape as mmg_node's /nmpc/solve client: the
+        # /nmpc/solve handler below blocks on /sensor/measure, so it must live
+        # in its own callback group, separate from the client's, with a
+        # MultiThreadedExecutor -- otherwise the busy-wait below would starve
+        # the executor thread the response callback needs to run on.
+        self._solve_cbg = MutuallyExclusiveCallbackGroup()
+        self._sensor_client_cbg = ReentrantCallbackGroup()
+
+        self.sensor_client = self.create_client(MeasureState, '/sensor/measure', callback_group=self._sensor_client_cbg)
+
+        self.create_service(SolveNMPC, '/nmpc/solve', self._handle_solve, callback_group=self._solve_cbg)
 
         self.get_logger().info('nmpc_node up, /nmpc/solve ready')
 
@@ -141,8 +161,29 @@ class NmpcNode(Node):
         msg.control_horizon = np.asarray(u_opt, dtype=float).T.flatten(order='C').tolist()
         return msg
 
+    def _measure(self, true_state):
+        """Blocking call to /sensor/measure, mirroring mmg_node's busy-wait on
+        /nmpc/solve (see module docstring). Falls back to the true state --
+        logged, not silent -- if sensor_node isn't up, so running without it
+        degrades gracefully instead of hanging the whole solve."""
+        if not self.sensor_client.service_is_ready():
+            self.get_logger().warn('/sensor/measure not available, using true state', throttle_duration_sec=2.0)
+            return true_state
+
+        measure_request = MeasureState.Request()
+        measure_request.true_state = true_state
+        future = self.sensor_client.call_async(measure_request)
+        while rclpy.ok() and not future.done():
+            time.sleep(0.0005)
+        if not rclpy.ok():
+            return true_state
+        if future.exception() is not None:
+            self.get_logger().error(f'/sensor/measure call failed: {future.exception()}, using true state')
+            return true_state
+        return future.result().measured_state
+
     def _handle_solve(self, request: SolveNMPC.Request, response: SolveNMPC.Response) -> SolveNMPC.Response:
-        state = request.state
+        state = self._measure(request.state)
         mmg_state = [state.u, state.v, state.r, state.x, state.y, state.psi]
         delta, n = float(state.delta), float(state.n)
 
@@ -188,8 +229,10 @@ class NmpcNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = NmpcNode()
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
         node.destroy_node()
         rclpy.shutdown()

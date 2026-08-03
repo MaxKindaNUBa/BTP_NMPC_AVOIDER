@@ -30,4 +30,8 @@ def generate_launch_description():
             package='nmpc_sim_nodes', executable='mmg_node', name='mmg_node',
             output='screen', parameters=[params_file],
         ),
+        Node(
+            package='nmpc_sim_nodes', executable='sensor_node', name='sensor_node',
+            output='screen', parameters=[params_file],
+        ),
     ])

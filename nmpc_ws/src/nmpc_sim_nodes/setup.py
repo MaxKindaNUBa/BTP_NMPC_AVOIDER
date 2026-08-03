@@ -29,6 +29,7 @@ setup(
             'map_node = nmpc_sim_nodes.map_node:main',
             'nmpc_node = nmpc_sim_nodes.nmpc_node:main',
             'mmg_node = nmpc_sim_nodes.mmg_node:main',
+            'sensor_node = nmpc_sim_nodes.sensor_node:main',
             'viz_node = nmpc_sim_nodes.viz_node:main',
             'rviz_node = nmpc_sim_nodes.rviz_node:main',
             'run_demo = nmpc_sim_nodes.run_demo:main',
