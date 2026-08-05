@@ -23,7 +23,8 @@ import casadi as ca
 import numpy as np
 
 
-def MMG_Time_Derivative_casadi(state, control, smooth=True, scale=1000.0):
+def MMG_Time_Derivative_casadi(state, control, current=(0.0, 0.0), wave_force=(0.0, 0.0, 0.0),
+                                smooth=True, scale=1000.0):
     """
     CasADi implementation of MMG_Time_Derivative.
 
@@ -33,6 +34,16 @@ def MMG_Time_Derivative_casadi(state, control, smooth=True, scale=1000.0):
         Current state of the ship [u, v, r, x, y, psi]
     control : ca.MX or ca.SX
         Control inputs [delta, rps] (rudder angle in rad, propeller speed in rps)
+    current : (float, float) or ca.MX/ca.SX pair, default (0.0, 0.0)
+        Earth-frame current velocity (vcx, vcy) [m/s]. Enters only the
+        hydrodynamic force terms below (hull/propeller/rudder) via relative
+        velocity substitution -- the mass matrix, LHS_r, and kinematics block
+        stay in terms of the state's own (absolute) u_val, v, r. Standard
+        MMG-plus-current approximation; default is disturbance-free.
+    wave_force : (float, float, float) or ca.MX/ca.SX triple, default (0.0, 0.0, 0.0)
+        Body-frame (surge, sway, yaw) second-order wave-drift force/moment
+        [N, N, N*m], added directly into the RHS before the M^-1 solve.
+        Default is disturbance-free (replaces the old always-zero F_Drift).
     smooth : bool, default True
         If True, uses smooth tanh blending for continuous functions.
         If False, uses ca.if_else for exact NumPy behavior replication.
@@ -54,9 +65,20 @@ def MMG_Time_Derivative_casadi(state, control, smooth=True, scale=1000.0):
         u_val = ca.if_else(u <= 0, 0.00001, u)
         rps_val = ca.if_else(rps <= 0, 1.0, rps)
 
-    U             = ca.sqrt((u_val**2)+(v**2))   # Resultant speed
+    # Current: earth-frame (vcx, vcy) -> body-frame (uc, vc) via the state's
+    # own psi, then relative velocity (ur, vr) substituted for (u_val, v) in
+    # every hydrodynamic quantity below that depends on flow past the hull
+    # (U/beta, v_ndm/r_ndm, beta_P/Jp, beta_R/uR). u_val, v themselves stay
+    # untouched in the mass matrix/LHS_r/kinematics further down.
+    vcx, vcy = current[0], current[1]
+    uc = vcx * ca.cos(psi) + vcy * ca.sin(psi)
+    vc = -vcx * ca.sin(psi) + vcy * ca.cos(psi)
+    ur = u_val - uc
+    vr = v - vc
 
-    beta          = ca.atan2(-v, u_val)          # Hull drift angle at midship
+    U             = ca.sqrt((ur**2)+(vr**2))     # Resultant speed, relative to water
+
+    beta          = ca.atan2(-vr, ur)            # Hull drift angle at midship, relative
     Np            = rps_val                      # Just for notation
 
     ################################################
@@ -110,7 +132,7 @@ def MMG_Time_Derivative_casadi(state, control, smooth=True, scale=1000.0):
     #####################################################
     ####### Hydrodynamic Force on Hull(F_hull)  #########
     #####################################################
-    v_ndm = v/U
+    v_ndm = vr/U
     r_ndm = r*Lpp/U
 
     R0 = 0.022 # Ship resistance coefficient in straight moving
@@ -139,7 +161,7 @@ def MMG_Time_Derivative_casadi(state, control, smooth=True, scale=1000.0):
     beta_P      = beta - (xP * r_ndm)      # geometrical inflow angle
 
     wp          = wp0*ca.exp(-4*(beta_P**2))   # Equation 12
-    Jp          = u_val*(1-wp)/(Np*Dp)         # Equation 11
+    Jp          = ur*(1-wp)/(Np*Dp)            # Equation 11
     KT          = k0 + k1*Jp + k2*(Jp**2)      # Equation 10
     T           = rho*(Np**2)*(Dp**4)*KT       # Equation 9
     X_propellar = (1 - tp)*T                   # Equation 8
@@ -152,7 +174,7 @@ def MMG_Time_Derivative_casadi(state, control, smooth=True, scale=1000.0):
     epsilon    = 1.09                   # Ratio of wake fraction
     k          = 0.5                    # An experimental constant for expressing uR
     eta        = Dp/HR                  # Ratio of propeller diameter to rudder span
-    uP         = (1 - wp)*u_val         # propeller inflow velocity
+    uP         = (1 - wp)*ur            # propeller inflow velocity
 
     uR1   = ca.sqrt(1 + ((8*KT)/(ca.pi * (Jp**2))))
     uR2   = (1 + k*(uR1 - 1))**2
@@ -185,7 +207,7 @@ def MMG_Time_Derivative_casadi(state, control, smooth=True, scale=1000.0):
 
     F_rudder = ca.vertcat(X_rudder, Y_rudder, N_rudder)
 
-    F_Drift = ca.vertcat(0.0, 0.0, 0.0)
+    F_Drift = ca.vertcat(*wave_force)
 
     # Solve dynamics
     RHS = F_hull + F_propellar + F_rudder - LHS_r + F_Drift
@@ -204,22 +226,36 @@ def MMG_Time_Derivative_casadi(state, control, smooth=True, scale=1000.0):
     dstate = ca.vertcat(X_acc[0], X_acc[1], X_acc[2], Vel_Mom[0], Vel_Mom[1], Vel_Mom[2])
     return dstate
 
-def make_casadi_integrator(h, method="rk4", smooth=True, scale=1000.0, sym_type=ca.MX):
+def make_casadi_integrator(h, method="rk4", smooth=True, scale=1000.0, sym_type=ca.MX, with_env=False):
     """
-    Creates a CasADi Function mapping (state, control) -> next_state.
+    Creates a CasADi Function mapping (state, control) -> next_state, or, when
+    with_env=True, (state, control, current, wave_force) -> next_state --
+    current/wave_force held constant across the RK4 substeps, the same
+    convention already used for control within one integration step. Default
+    (with_env=False) leaves the exported Function's input signature exactly
+    as before -- every existing call site is unaffected.
     """
     state = sym_type.sym("state", 6)      # [u, v, r, x, y, psi]
     control = sym_type.sym("control", 2)  # [delta, rps]
 
+    if with_env:
+        current = sym_type.sym("current", 2)          # [vcx, vcy], earth-frame
+        wave_force = sym_type.sym("wave_force", 3)     # [fx, fy, fn], body-frame
+        current_arg = (current[0], current[1])
+        wave_force_arg = (wave_force[0], wave_force[1], wave_force[2])
+    else:
+        current_arg = (0.0, 0.0)
+        wave_force_arg = (0.0, 0.0, 0.0)
+
     u, v, r, x, y, psi = state[0], state[1], state[2], state[3], state[4], state[5]
 
     if method.lower() == "euler":
-        dstate = MMG_Time_Derivative_casadi(state, control, smooth, scale)
+        dstate = MMG_Time_Derivative_casadi(state, control, current_arg, wave_force_arg, smooth, scale)
         r_dot_a = dstate[2]
         nxt_state = state + h * dstate
 
     elif method.lower() == "rk4":
-        K1_ = MMG_Time_Derivative_casadi(state, control, smooth, scale)
+        K1_ = MMG_Time_Derivative_casadi(state, control, current_arg, wave_force_arg, smooth, scale)
         r_dot_a = K1_[2]
         K1 = h * K1_[:3]
         k1 = h * ca.vertcat(u, v, r)
@@ -232,7 +268,7 @@ def make_casadi_integrator(h, method="rk4", smooth=True, scale=1000.0, sym_type=
             y + k1[1]/2.0,
             psi + k1[2]/2.0
         )
-        K2_ = MMG_Time_Derivative_casadi(state2, control, smooth, scale)
+        K2_ = MMG_Time_Derivative_casadi(state2, control, current_arg, wave_force_arg, smooth, scale)
         K2 = h * K2_[:3]
         k2 = h * (ca.vertcat(u, v, r) + 0.5 * K1)
 
@@ -244,7 +280,7 @@ def make_casadi_integrator(h, method="rk4", smooth=True, scale=1000.0, sym_type=
             y + k2[1]/2.0,
             psi + k2[2]/2.0
         )
-        K3_ = MMG_Time_Derivative_casadi(state3, control, smooth, scale)
+        K3_ = MMG_Time_Derivative_casadi(state3, control, current_arg, wave_force_arg, smooth, scale)
         K3 = h * K3_[:3]
         k3 = h * (ca.vertcat(u, v, r) + 0.5 * K2)
 
@@ -256,7 +292,7 @@ def make_casadi_integrator(h, method="rk4", smooth=True, scale=1000.0, sym_type=
             y + k3[1],
             psi + k3[2]
         )
-        K4_ = MMG_Time_Derivative_casadi(state4, control, smooth, scale)
+        K4_ = MMG_Time_Derivative_casadi(state4, control, current_arg, wave_force_arg, smooth, scale)
         K4 = h * K4_[:3]
         k4 = h * (ca.vertcat(u, v, r) + 0.5 * K3)
 
@@ -282,7 +318,12 @@ def make_casadi_integrator(h, method="rk4", smooth=True, scale=1000.0, sym_type=
     else:
         raise ValueError(f"Unknown integration method: {method}")
 
-    return ca.Function(f"{method}_step", [state, control], [nxt_state, r_dot_a], ["state", "control"], ["next_state", "r_dot_a"])
+    inputs, input_names = [state, control], ["state", "control"]
+    if with_env:
+        inputs += [current, wave_force]
+        input_names += ["current", "wave_force"]
+
+    return ca.Function(f"{method}_step", inputs, [nxt_state, r_dot_a], input_names, ["next_state", "r_dot_a"])
 
 def make_acados_integrator(h, smooth=True, scale=1000.0):
     """
