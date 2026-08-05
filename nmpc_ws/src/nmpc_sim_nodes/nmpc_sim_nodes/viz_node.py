@@ -6,6 +6,7 @@ via the /map/get_scenario service -- built for exactly this "late-joining
 tool" purpose -- then follows the live simulation over topics only, the same
 way any other passive consumer would.
 """
+import math
 import os
 import threading
 
@@ -20,11 +21,11 @@ _pkg_paths.ensure_on_path()
 
 from nmpc.config import IDX_U, IDX_V, IDX_R, IDX_X, IDX_Y, IDX_PSI, IDX_DELTA, IDX_N  # noqa: E402
 
-from mpc_bridge import MPCBridge, Obstacle as BridgeObstacle  # noqa: E402
+from mpc_bridge import CurrentReading, MPCBridge, Obstacle as BridgeObstacle, WaveReading  # noqa: E402
 from visualizer import MPCVisualizer  # noqa: E402
 
 from nmpc_interfaces.msg import (  # noqa: E402
-    ActiveReference, ObstacleArray, PredictionHorizon, SimStatus, VesselState,
+    ActiveReference, CurrentState, ObstacleArray, PredictionHorizon, SimStatus, VesselState, WaveState,
 )
 from nmpc_interfaces.srv import GetScenario  # noqa: E402
 
@@ -74,6 +75,8 @@ class VizNode(Node):
         self.create_subscription(ObstacleArray, '/map/obstacles', self._on_obstacles, _LATCHED_QOS)
         self.create_subscription(ActiveReference, '/map/active_reference', self._on_active_reference, _REFERENCE_QOS)
         self.create_subscription(SimStatus, '/map/sim_status', self._on_sim_status, _LATCHED_QOS)
+        self.create_subscription(CurrentState, '/env/current_state', self._on_current_state, 10)
+        self.create_subscription(WaveState, '/env/wave_state', self._on_wave_state, 10)
 
         self.get_logger().info(f'viz_node up: {len(waypoints)} waypoints, {len(obstacles)} obstacles, log_dir={log_dir}')
 
@@ -118,6 +121,19 @@ class VizNode(Node):
 
     def _on_active_reference(self, msg: ActiveReference):
         self.bridge.set_active_waypoint((msg.x_d, msg.y_d))
+
+    def _on_current_state(self, msg: CurrentState):
+        self.bridge.update_current(CurrentReading(
+            vx=msg.vx, vy=msg.vy, speed=msg.speed, heading=msg.heading, enabled=msg.enabled))
+
+    def _on_wave_state(self, msg: WaveState):
+        # msg.fx/fy are body-frame (see CurrentState.msg/WaveState.msg); rotate into
+        # earth-frame using the latest known heading for the compass HUD, same
+        # rotation rviz_node.py's _on_wave_state applies for its ship-anchored arrow.
+        psi = float(self.bridge.snapshot().ship_state[5])  # bridge's own fixed [u,v,r,x,y,psi] order
+        earth_fx = msg.fx * math.cos(psi) - msg.fy * math.sin(psi)
+        earth_fy = msg.fx * math.sin(psi) + msg.fy * math.cos(psi)
+        self.bridge.update_wave(WaveReading(fx=earth_fx, fy=earth_fy, fn=msg.fn, enabled=msg.enabled))
 
     def _on_sim_status(self, msg: SimStatus):
         if msg.status != SimStatus.RUNNING:

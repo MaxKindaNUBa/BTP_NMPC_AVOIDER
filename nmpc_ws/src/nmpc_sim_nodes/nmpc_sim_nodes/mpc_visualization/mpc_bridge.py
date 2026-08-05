@@ -13,6 +13,26 @@ class Obstacle:
     static: bool = True
 
 @dataclass
+class CurrentReading:
+    """Latest /env/current_state sample, earth-frame (vx=North, vy=East), for the compass HUD."""
+    vx: float = 0.0
+    vy: float = 0.0
+    speed: float = 0.0
+    heading: float = 0.0
+    enabled: bool = False
+
+@dataclass
+class WaveReading:
+    """Latest /env/wave_state sample. Frame is caller-defined: viz_node.py rotates
+    the message's body-frame fx/fy to earth-frame (fx=North, fy=East) for its
+    map-aligned compass inset; hud_node.py stores WaveState's raw body-frame
+    fx/fy as-is, since its wave widget is a frame-agnostic force-space scatter."""
+    fx: float = 0.0
+    fy: float = 0.0
+    fn: float = 0.0
+    enabled: bool = False
+
+@dataclass
 class MPCBridgeState:
     ship_state: np.ndarray            # [u, v, r, x, y, psi]
     timestamp: float
@@ -23,6 +43,8 @@ class MPCBridgeState:
     start: Tuple[float, float]
     goal: Tuple[float, float]
     active_waypoint: Optional[Tuple[float, float]] = None  # (x, y) target the NMPC is currently steering toward
+    current: CurrentReading = None    # water current, for the compass HUD
+    wave: WaveReading = None          # wave drift force, for the compass HUD
 
 class MPCBridge:
     """
@@ -42,6 +64,8 @@ class MPCBridge:
         self._start = start
         self._goal = goal
         self._active_waypoint = None  # set via set_active_waypoint() once a multi-leg path is in play
+        self._current = CurrentReading()  # set via update_current() once env_node is up
+        self._wave = WaveReading()        # set via update_wave() once env_node is up
 
     def update_ship_state(self, state: np.ndarray, t: float):
         with self._lock:
@@ -52,6 +76,20 @@ class MPCBridge:
         with self._lock:
             self._predicted_trajectory = np.array(predicted_trajectory, dtype=np.float64)
             self._control_horizon = np.array(control_horizon, dtype=np.float64)
+
+    def update_control_horizon(self, control_horizon: np.ndarray):
+        # for consumers (e.g. hud_node.py) that only care about the control-horizon
+        # panel and never touch predicted_trajectory -- avoids feeding it dummy data.
+        with self._lock:
+            self._control_horizon = np.array(control_horizon, dtype=np.float64)
+
+    def update_current(self, current: CurrentReading):
+        with self._lock:
+            self._current = current
+
+    def update_wave(self, wave: WaveReading):
+        with self._lock:
+            self._wave = wave
 
     def set_obstacles(self, obstacles: List[Obstacle]):
         with self._lock:
@@ -111,5 +149,7 @@ class MPCBridge:
                 obstacles=list(self._obstacles),
                 start=self._start,
                 goal=self._goal,
-                active_waypoint=self._active_waypoint
+                active_waypoint=self._active_waypoint,
+                current=self._current,
+                wave=self._wave
             )

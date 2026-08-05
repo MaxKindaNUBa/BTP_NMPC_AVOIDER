@@ -23,8 +23,10 @@ _pkg_paths.ensure_on_path()
 
 from nmpc.config import IDX_X, IDX_Y  # noqa: E402
 
-from nmpc_interfaces.msg import ActiveReference, ObstacleArray, PredictionHorizon, SimStatus, VesselState  # noqa: E402
+from nmpc_interfaces.msg import (ActiveReference, CurrentState, ObstacleArray, PredictionHorizon,  # noqa: E402
+                                  SimStatus, VesselState, WaveState)
 from nmpc_interfaces.srv import GetScenario  # noqa: E402
+from rviz_2d_overlay_msgs.msg import OverlayText  # noqa: E402
 
 _LATCHED_QOS = QoSProfile(
     depth=1,
@@ -43,9 +45,40 @@ _TRAIL_MAX_POINTS = 5000
 _SHIP_LENGTH = 2.902  # LPP; matches nmpc.config.NMPCConfig default
 _SHIP_WIDTH = 0.7 * _SHIP_LENGTH * 0.25
 
+# Display-only scale factors: current speed [m/s] and wave force [N] are both
+# far too small in magnitude to read as arrow lengths at ship scale, so both
+# get a fixed visual gain -- these do not affect the underlying data, only
+# how long the RViz arrow is drawn.
+_CURRENT_ARROW_GAIN = 20.0
+_WAVE_ARROW_GAIN = 40.0
+_MIN_ARROW_LENGTH = 0.3
+
 
 def _color(r, g, b, a=1.0):
     return ColorRGBA(r=r, g=g, b=b, a=a)
+
+
+def _overlay_text(text, horizontal_alignment, vertical_alignment, horizontal_distance, vertical_distance,
+                   width, height, text_size=12.0):
+    # rviz_2d_overlay_plugins/TextOverlay: a screen-pixel-anchored text box (unlike
+    # every other HUD element in this file, which is a world-space Marker) -- stays
+    # put regardless of camera pan/zoom. width/height must be set explicitly or the
+    # plugin renders a zero-size texture.
+    m = OverlayText()
+    m.action = OverlayText.ADD
+    m.width = width
+    m.height = height
+    m.horizontal_distance = horizontal_distance
+    m.vertical_distance = vertical_distance
+    m.horizontal_alignment = horizontal_alignment
+    m.vertical_alignment = vertical_alignment
+    m.bg_color = _color(0.0, 0.0, 0.0, 0.5)
+    m.fg_color = _color(0.9, 0.9, 0.9, 0.95)
+    m.line_width = 2
+    m.text_size = text_size
+    m.font = 'DejaVu Sans Mono'
+    m.text = text
+    return m
 
 
 def _plot_point(state_x, state_y, z=0.0):
@@ -54,6 +87,17 @@ def _plot_point(state_x, state_y, z=0.0):
     # that convention here so RViz renders the same layout as the matplotlib tool,
     # instead of ROS's usual "world X = right" default.
     return Point(x=float(state_y), y=float(state_x), z=float(z))
+
+
+def _arrow_marker(ns, marker_id, x, y, heading, length, color):
+    m = Marker()
+    m.header.frame_id = 'map'
+    m.ns, m.id = ns, marker_id
+    m.type, m.action = Marker.ARROW, Marker.ADD
+    m.pose = Pose(position=_plot_point(x, y, 0.05), orientation=_yaw_quat(heading))
+    m.scale = Vector3(x=max(length, _MIN_ARROW_LENGTH), y=0.15, z=0.15)
+    m.color = color
+    return m
 
 
 def _yaw_quat(psi):
@@ -71,6 +115,8 @@ class RvizNode(Node):
 
         self.markers_pub = self.create_publisher(MarkerArray, '/viz/markers', 10)
         self.status_pub = self.create_publisher(String, '/viz/status_text', 10)
+        self.status_overlay_pub = self.create_publisher(OverlayText, '/viz/status_overlay', 10)
+        self.env_overlay_pub = self.create_publisher(OverlayText, '/viz/env_overlay', 10)
 
         scenario = self._fetch_scenario()
         waypoints = list(zip(scenario.waypoints_x, scenario.waypoints_y))
@@ -81,7 +127,12 @@ class RvizNode(Node):
         self._trail_marker = None
         self._prediction_marker = None
         self._active_wp_marker = None
+        self._current_marker = None
+        self._wave_marker = None
+        self._last_vessel = None  # (x, y, psi), for current/wave arrows -- set by _on_mmg_state
         self._trail_points = collections.deque(maxlen=_TRAIL_MAX_POINTS)
+        self._current_state_msg = None  # latest /env/current_state, for the top-right env_overlay
+        self._wave_state_msg = None     # latest /env/wave_state, for the top-right env_overlay
 
         # cached, used by the /viz/status_text telemetry block (mirrors visualizer.py's info_text)
         self._goal = waypoints[-1]
@@ -100,6 +151,8 @@ class RvizNode(Node):
         self.create_subscription(ObstacleArray, '/map/obstacles', self._on_obstacles, _LATCHED_QOS)
         self.create_subscription(ActiveReference, '/map/active_reference', self._on_active_reference, _REFERENCE_QOS)
         self.create_subscription(SimStatus, '/map/sim_status', self._on_sim_status, _LATCHED_QOS)
+        self.create_subscription(CurrentState, '/env/current_state', self._on_current_state, 10)
+        self.create_subscription(WaveState, '/env/wave_state', self._on_wave_state, 10)
 
         self.get_logger().info(f'rviz_node up: {len(waypoints)} waypoints, {len(self._obstacle_markers)} obstacles; '
                                 f'publishing MarkerArray on /viz/markers, telemetry on /viz/status_text')
@@ -146,6 +199,8 @@ class RvizNode(Node):
 
     # ---- live callbacks --------------------------------------------------
     def _on_mmg_state(self, msg: VesselState):
+        self._last_vessel = (msg.x, msg.y, msg.psi)
+
         ship = Marker()
         ship.header.frame_id = 'map'
         ship.ns, ship.id = 'ship', 0
@@ -166,6 +221,9 @@ class RvizNode(Node):
         self._trail_marker = trail
 
         self.status_pub.publish(String(data=self._build_status_text(msg)))
+        self.status_overlay_pub.publish(_overlay_text(
+            self._build_status_text(msg), OverlayText.LEFT, OverlayText.BOTTOM,
+            horizontal_distance=10, vertical_distance=10, width=300, height=230))
         self._publish_all()
 
     def _on_prediction_horizon(self, msg: PredictionHorizon):
@@ -199,6 +257,68 @@ class RvizNode(Node):
         self._active_wp_marker = m
         self._active_waypoint = (msg.x_d, msg.y_d)
         self._publish_all()
+
+    def _on_current_state(self, msg: CurrentState):
+        if not msg.enabled or self._last_vessel is None:
+            self._current_marker = None
+        else:
+            x, y, _ = self._last_vessel
+            self._current_marker = _arrow_marker(
+                'current', 0, x, y, msg.heading, msg.speed * _CURRENT_ARROW_GAIN,
+                _color(0.2, 0.8, 0.9, 0.9))
+        self._current_state_msg = msg
+        self._publish_env_overlay()
+        self._publish_all()
+
+    def _on_wave_state(self, msg: WaveState):
+        if not msg.enabled or self._last_vessel is None:
+            self._wave_marker = None
+        else:
+            x, y, psi = self._last_vessel
+            # body-frame (fx, fy) -> earth frame, for display purposes only
+            # (same rotation casadi_mmg.py's R_mat applies to velocity).
+            earth_fx = msg.fx * math.cos(psi) - msg.fy * math.sin(psi)
+            earth_fy = msg.fx * math.sin(psi) + msg.fy * math.cos(psi)
+            heading = math.atan2(earth_fy, earth_fx)
+            magnitude = math.hypot(earth_fx, earth_fy)
+            self._wave_marker = _arrow_marker(
+                'wave', 0, x, y, heading, magnitude * _WAVE_ARROW_GAIN, _color(1.0, 0.4, 0.7, 0.9))
+        self._wave_state_msg = msg
+        self._publish_env_overlay()
+        self._publish_all()
+
+    def _publish_env_overlay(self):
+        # top-right numeric readout of everything CurrentState/WaveState carry --
+        # companion to the bottom-left status_overlay, kept plain-text/no graphics
+        # since the actual compass/wave-scatter icons now live in hud_node.py's window.
+        c, w = self._current_state_msg, self._wave_state_msg
+        if c is None or w is None:
+            return
+
+        if c.enabled:
+            current_text = (
+                f"Speed   : {c.speed:7.4f} m/s\n"
+                f"Heading : {math.degrees(c.heading):7.2f} deg\n"
+                f"Vx, Vy  : {c.vx:7.4f}, {c.vy:7.4f} m/s"
+            )
+        else:
+            current_text = "off"
+
+        if w.enabled:
+            wave_text = (
+                f"Fx      : {w.fx: .3e} N\n"
+                f"Fy      : {w.fy: .3e} N\n"
+                f"Fn      : {w.fn: .3e} N·m\n"
+                f"Hs      : {w.hs:7.4f} m\n"
+                f"Tp      : {w.tp:7.2f} s"
+            )
+        else:
+            wave_text = "off"
+
+        text = f"=== CURRENT ===\n{current_text}\n\n=== WAVE ===\n{wave_text}"
+        self.env_overlay_pub.publish(_overlay_text(
+            text, OverlayText.RIGHT, OverlayText.TOP,
+            horizontal_distance=10, vertical_distance=10, width=300, height=230))
 
     def _build_status_text(self, msg: VesselState) -> str:
         # mirrors mpc_visualization/visualizer.py's info_text block (SHIP STATUS /
@@ -234,7 +354,8 @@ class RvizNode(Node):
     # ------------------------------------------------------------------
     def _publish_all(self):
         markers = list(self._path_markers) + list(self._obstacle_markers)
-        for m in (self._active_wp_marker, self._trail_marker, self._prediction_marker, self._ship_marker):
+        for m in (self._active_wp_marker, self._trail_marker, self._prediction_marker, self._ship_marker,
+                  self._current_marker, self._wave_marker):
             if m is not None:
                 markers.append(m)
         now = self.get_clock().now().to_msg()
