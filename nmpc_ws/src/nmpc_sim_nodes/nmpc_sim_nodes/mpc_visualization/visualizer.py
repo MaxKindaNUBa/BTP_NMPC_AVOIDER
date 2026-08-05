@@ -102,6 +102,14 @@ class MPCVisualizer:
                                          fontsize=9, fontfamily='monospace',
                                          verticalalignment='top', bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
 
+        # Current/wave compass HUD, top-right corner of the map panel: a ring with an
+        # arrow pointing in the earth-frame direction, magnitude printed underneath.
+        # Screen axes match the main plot's (East=x, North=y) convention throughout.
+        self.ax_current = self.ax_map.inset_axes([0.80, 0.80, 0.17, 0.17])
+        self.ax_wave = self.ax_map.inset_axes([0.80, 0.58, 0.17, 0.17])
+        self.current_arrow, self.current_label = self._init_compass(self.ax_current, 'CURRENT', '#1f9fd6')
+        self.wave_arrow, self.wave_label = self._init_compass(self.ax_wave, 'WAVE', '#e6659a')
+
         # Horizon Plot Elements
         self.line_rudder, = self.ax_ctrl.plot([], [], 'g-s', markersize=4, label='Rudder δ (deg)')
         self.line_rps, = self.ax_ctrl_right.plot([], [], 'r-o', markersize=4, label='Propeller n_p (rps)')
@@ -133,6 +141,34 @@ class MPCVisualizer:
                 pass
 
 
+    def _init_compass(self, ax, title, color):
+        """Builds a static ring + centered arrow/label pair on a small inset axes;
+        returns (arrow_annotation, label_text) for _update_compass() to drive per-frame."""
+        ax.set_xlim(-1.15, 1.15)
+        ax.set_ylim(-1.3, 1.15)
+        ax.set_aspect('equal')
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_title(title, fontsize=7, pad=2)
+        ax.patch.set_alpha(0.85)
+        ax.add_patch(Circle((0, 0), 1.0, fill=False, edgecolor='gray', linewidth=1.0))
+        arrow = ax.annotate('', xy=(0, 0), xytext=(0, 0),
+                             arrowprops=dict(arrowstyle='-|>', color=color, linewidth=2))
+        arrow.set_visible(False)
+        label = ax.text(0, -1.3, '', fontsize=7, ha='center', va='top')
+        return arrow, label
+
+    def _update_compass(self, arrow, label, screen_dx, screen_dy, magnitude, unit):
+        """Points the arrow toward (screen_dx, screen_dy) at fixed ring radius (direction
+        only -- magnitude is not arrow length, since current/wave magnitudes are tiny and
+        unbounded) and prints the magnitude below."""
+        if magnitude > 1e-6:
+            arrow.xy = (0.85 * screen_dx / magnitude, 0.85 * screen_dy / magnitude)
+            arrow.set_visible(True)
+        else:
+            arrow.set_visible(False)
+        label.set_text(f'{magnitude:.2f} {unit}')
+
     def draw_ship_polygon(self, x, y, psi):
         """
         Creates a triangle/wedge polygon aligned with heading psi.
@@ -157,15 +193,26 @@ class MPCVisualizer:
         self.line_rps.set_data([], [])
         self.active_wp_marker.set_data([], [])
         return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
-                self.line_rudder, self.line_rps, self.active_wp_marker)
+                self.line_rudder, self.line_rps, self.active_wp_marker,
+                self.current_arrow, self.current_label, self.wave_arrow, self.wave_label)
 
     def update_plot(self, frame):
         if not self.is_running:
             return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
-                    self.line_rudder, self.line_rps, self.active_wp_marker)
+                    self.line_rudder, self.line_rps, self.active_wp_marker,
+                    self.current_arrow, self.current_label, self.wave_arrow, self.wave_label)
 
         snap = self.bridge.snapshot()
         u, v, r, x, y, psi = snap.ship_state
+
+        # Current/wave compass HUD: direction only (arrow), magnitude as text.
+        # Screen (East, North) == data (y, x), same convention as the ship/trail plot.
+        cur = snap.current
+        self._update_compass(self.current_arrow, self.current_label,
+                              cur.vy, cur.vx, cur.speed if cur.enabled else 0.0, 'm/s')
+        wav = snap.wave
+        wave_mag = float(np.hypot(wav.fx, wav.fy)) if wav.enabled else 0.0
+        self._update_compass(self.wave_arrow, self.wave_label, wav.fy, wav.fx, wave_mag, 'N')
 
         # Update map history
         self.trail_x.append(x)
@@ -318,12 +365,14 @@ class MPCVisualizer:
             self.ax_ctrl_right.set_ylim([min(rpss) - 1.0, max(rpss) + 1.0])
 
         if frame == 0:
-            self.ax_map.legend(loc='upper right', fontsize=8)
+            # 'lower right': 'upper right' is now the current/wave compass HUD's corner.
+            self.ax_map.legend(loc='lower right', fontsize=8)
             lines_ctrl = [self.line_rudder, self.line_rps]
             self.ax_ctrl.legend(lines_ctrl, [l.get_label() for l in lines_ctrl], loc='upper right', fontsize=8)
 
         return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
-                self.line_rudder, self.line_rps, self.active_wp_marker)
+                self.line_rudder, self.line_rps, self.active_wp_marker,
+                self.current_arrow, self.current_label, self.wave_arrow, self.wave_label)
 
     def start(self):
         self.anim = FuncAnimation(self.fig, self.update_plot, init_func=self.init_plot,
