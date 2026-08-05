@@ -33,6 +33,7 @@ setup(
             'env_node = nmpc_sim_nodes.env_node:main',
             'viz_node = nmpc_sim_nodes.viz_node:main',
             'rviz_node = nmpc_sim_nodes.rviz_node:main',
+            'hud_node = nmpc_sim_nodes.hud_node:main',
             'run_demo = nmpc_sim_nodes.run_demo:main',
             'test_nmpc = nmpc_sim_nodes.test_nmpc:main',
             'test_sensor_model = nmpc_sim_nodes.sensor_model.test_sensor_model:main',
