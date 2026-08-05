@@ -22,13 +22,28 @@ actual relative wave heading and encounter frequency at each simulation step.
 
 ## Usage
 
-Only consumed by `Preliminary_func.py`'s `MMG_Time_Derivative(..., w_flag=True)`
-path. The wave-drift term is deliberately **not** ported into the CasADi/NMPC
-model chain (`casadi_mmg_solver/`, `nmpc/`) — table lookups don't belong in an
-NLP's inner loop, and the disturbance-free dynamics are what the NMPC
-prediction model needs. If wave disturbances are ever reintroduced for the
-NMPC (e.g. as an external unmodeled disturbance term rather than an internal
-prediction-model term), this is the data they'd come from.
+Consumed by two things now:
+
+- `Preliminary_func.py`'s `MMG_Time_Derivative(..., w_flag=True)` path (the
+  original single-fixed-frequency regular-wave drift term).
+- `nmpc_sim_nodes/env_model/wave_model.py`'s `WaveModel` (see
+  `WAVE_CURRENT_DISTURBANCE_PLAN.md`), which loads these same three tables
+  and builds the same `(heading, frequency)` `RegularGridInterpolator`s, but
+  discretizes a full JONSWAP `Hs`/`Tp`/`gamma` sea state into many frequency
+  components instead of evaluating at one, and sums a mean drift force with a
+  Newman's-approximation slow-drift term.
+
+The wave-drift term is still **not** ported into the CasADi/NMPC *prediction*
+model chain (`casadi_mmg_solver/`'s `MMG_Time_Derivative_casadi` as called by
+`nmpc/state_augmentation.py`) — table lookups don't belong in an NLP's inner
+loop, and the disturbance-free dynamics are what the NMPC prediction model
+needs. It's now reintroduced as exactly the "external unmodeled disturbance
+term" case this note used to describe as hypothetical: `env_node` computes
+the wave force *outside* the symbolic CasADi graph (using this data) and
+`mmg_node`'s plant integrator adds the resulting numeric force straight into
+the dynamics' RHS for that tick, via `casadi_mmg.py`'s optional `wave_force`
+argument. The NMPC's own internal model never calls `WaveModel` and never
+sees this data.
 
 ## Regenerating / replacing
 

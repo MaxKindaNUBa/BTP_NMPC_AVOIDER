@@ -19,7 +19,7 @@ import casadi as ca  # noqa: E402
 from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
 
 from nmpc_interfaces.msg import SimStatus, VesselState  # noqa: E402
-from nmpc_interfaces.srv import ResetSim, SolveNMPC  # noqa: E402
+from nmpc_interfaces.srv import GetEnvDisturbance, ResetSim, SolveNMPC  # noqa: E402
 
 _LATCHED_QOS = QoSProfile(
     depth=1,
@@ -40,7 +40,7 @@ class MmgNode(Node):
         self.declare_parameter('dt', 0.1)
         self.dt = float(self.get_parameter('dt').value)
 
-        self.plant_step = make_casadi_integrator(self.dt, method='rk4', sym_type=ca.SX)
+        self.plant_step = make_casadi_integrator(self.dt, method='rk4', sym_type=ca.SX, with_env=True)
 
         self.mmg_state = None          # np.ndarray[6], seeded from /map/initial_state
         self.delta = None
@@ -60,6 +60,7 @@ class MmgNode(Node):
         self.state_pub = self.create_publisher(VesselState, '/mmg/state', 10)
 
         self.solve_client = self.create_client(SolveNMPC, '/nmpc/solve', callback_group=self._client_cbg)
+        self.env_client = self.create_client(GetEnvDisturbance, '/env/disturbance', callback_group=self._client_cbg)
 
         # transient-local: mmg_node's tick loop is gated on seeing RUNNING at
         # least once, so a late subscription must still get map_node's last
@@ -138,9 +139,30 @@ class MmgNode(Node):
         response = future.result()
         delta, n = response.command.delta, response.command.n
 
+        current, wave_force = (0.0, 0.0), (0.0, 0.0, 0.0)
+        if not self.env_client.service_is_ready():
+            self.get_logger().warn('/env/disturbance not available yet, using zero disturbance this tick',
+                                    throttle_duration_sec=2.0)
+        else:
+            env_request = GetEnvDisturbance.Request()
+            env_request.state = request.state
+            env_future = self.env_client.call_async(env_request)
+            # same busy-wait pattern as /nmpc/solve above, and for the same
+            # reason (this callback runs inside the node's own executor).
+            while rclpy.ok() and not env_future.done():
+                time.sleep(0.0005)
+            if not rclpy.ok():
+                return
+            if env_future.exception() is not None:
+                self.get_logger().error(f'/env/disturbance call failed: {env_future.exception()}')
+            else:
+                env_response = env_future.result()
+                current = (env_response.current.vx, env_response.current.vy)
+                wave_force = (env_response.wave.fx, env_response.wave.fy, env_response.wave.fn)
+
         state_ca = ca.DM(self.mmg_state)
         control_ca = ca.DM([delta, n])
-        next_state, _ = self.plant_step(state_ca, control_ca)
+        next_state, _ = self.plant_step(state_ca, control_ca, ca.DM(list(current)), ca.DM(list(wave_force)))
         self.mmg_state = np.array(next_state).flatten()
         self.delta, self.n = delta, n
 

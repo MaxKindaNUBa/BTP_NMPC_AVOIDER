@@ -23,7 +23,7 @@ nmpc_node:
   ros__parameters:
     solver_backend: "acados"   # or "casadi"
 
-    N: 200
+    N: 400
     dt: 0.1   # MUST match mmg_node.dt above
     LPP: 2.902
     R_ASV_FACTOR: 0.5
@@ -74,10 +74,29 @@ sensor_node:
     # Master toggle: SENSOR_NOISE_MODEL.md's noise pipeline. false == pass
     # through, i.e. exactly the no-noise behavior the sim had before this
     # node existed. There is no partial-disable mode; false removes ALL of it.
-    enabled: true
+    enabled: false
     preset: "light"   # only preset available -- section 4 of SENSOR_NOISE_MODEL.md
-    seed: 42          # one run == one seed, for reproducible noise trajectories
+    seed: 4232          # one run == one seed, for reproducible noise trajectories
     dt: 0.1           # MUST match mmg_node.dt above (OU recursions are stepped once per tick)
+
+env_node:
+  ros__parameters:
+    dt: 0.1   # MUST match mmg_node.dt above (OU/wave-phase recursions stepped once per tick)
+
+    current_enabled: true        # independent toggle
+    current_mean_speed: 0.0       # [m/s]
+    current_mean_heading: 0.0     # [rad], earth-fixed, same convention as psi
+    current_time_constant: 600.0  # [s] Gauss-Markov Tc -- larger == slower wandering
+    current_sigma: 0.01           # [m/s per sqrt(s)] driving noise intensity
+    current_seed: 7
+
+    wave_enabled: true           # independent toggle
+    wave_hs: 0.05                 # [m] significant wave height, scaled-model units
+    wave_tp: 1.2                  # [s] peak period
+    wave_gamma: 3.3                # JONSWAP peak-enhancement factor (3.3 = standard North Sea fit)
+    wave_mean_heading: 0.0        # [rad] earth-fixed mean wave direction
+    wave_num_components: 30       # spectral discretization for Newman's approximation
+    wave_seed: 11
 
 map_node:
   ros__parameters:
