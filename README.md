@@ -535,21 +535,3 @@ LiDAR-based (rather than hardcoded) obstacle detection and clustering, state
 estimation integration (EKF fusion of IMU/GPS, per the known gap above) and
 the safety fallbacks that would depend on it, and progressively more
 realistic hardware-in-the-loop / real-vessel testing.
-
-## A note on how this repository's history was built
-
-This project's actual development happened across several AI coding-
-assistant sessions before any of it was under version control — the working
-directory simply accumulated files over roughly three weeks, then `git init`
-was run with nothing yet committed. The commit history in this repository
-was reconstructed afterward from that working directory's final state plus
-the accumulated chat history from those sessions (used only to understand
-*what changed, when, and why* — the raw chat logs themselves aren't part of
-this repository). Where a file went through multiple real, distinct stages
-of development (for example `casadi_mmg_solver/casadi_mmg.py` gaining acados
-support after its initial CasADi-only port, or the several rounds of bug
-fixes to `nmpc/path_following.py`), those stages are represented as separate
-commits with real incremental diffs between them, in their actual
-chronological order — this history is a faithful reconstruction of how the
-project was actually built, not an arbitrary re-packaging of a single final
-snapshot.

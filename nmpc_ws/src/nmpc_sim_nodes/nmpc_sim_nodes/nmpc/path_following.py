@@ -15,9 +15,10 @@ import casadi as ca
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from nmpc.config import (
-    DEFAULT_CONFIG, STATE_DIM,
+    STATE_DIM,
     IDX_EY, IDX_SPSI, IDX_CPSI, IDX_R, IDX_X, IDX_Y, IDX_PSI, IDX_U, IDX_V, IDX_DELTA, IDX_N,
 )
+from nmpc.params import DEFAULT_CONFIG
 
 
 def wrap_to_pi(angle: float) -> float:

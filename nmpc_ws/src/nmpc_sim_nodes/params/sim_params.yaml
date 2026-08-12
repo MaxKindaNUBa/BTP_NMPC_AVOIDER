@@ -26,7 +26,7 @@ nmpc_node:
     N: 400
     dt: 0.1   # MUST match mmg_node.dt above
     LPP: 2.902
-    R_ASV_FACTOR: 0.5
+    R_ASV_FACTOR: 0.7
 
     DELTA_MIN: -0.7853981633974483    # -45 deg [rad]
     DELTA_MAX: 0.7853981633974483     # +45 deg [rad]
@@ -38,7 +38,7 @@ nmpc_node:
     RPS_DOT_MIN: -5.0
     RPS_DOT_MAX: 5.0
 
-    U_REF: 0.70
+    U_REF: 0.78
     DELTA_TRIM: 0.0
     N_TRIM: 10.0
 
@@ -56,7 +56,7 @@ nmpc_node:
     R_DIAG: [0.01, 0.01]
     QE_SCALE: 2.0
 
-    IPOPT_MAX_ITER: 200
+    IPOPT_MAX_ITER: 300
     IPOPT_TOL: 1.0e-6
     IPOPT_PRINT_LEVEL: 0
 
@@ -86,12 +86,12 @@ env_node:
     current_enabled: true        # independent toggle
     current_mean_speed: 0.0       # [m/s]
     current_mean_heading: 0.0     # [rad], earth-fixed, same convention as psi
-    current_time_constant: 600.0  # [s] Gauss-Markov Tc -- larger == slower wandering
+    current_time_constant: 800.0  # [s] Gauss-Markov Tc -- larger == slower wandering
     current_sigma: 0.01           # [m/s per sqrt(s)] driving noise intensity
-    current_seed: 7
+    current_seed: 42
 
     wave_enabled: true           # independent toggle
-    wave_hs: 0.05                 # [m] significant wave height, scaled-model units
+    wave_hs: 0.1                 # [m] significant wave height, scaled-model units
     wave_tp: 1.2                  # [s] peak period
     wave_gamma: 3.3                # JONSWAP peak-enhancement factor (3.3 = standard North Sea fit)
     wave_mean_heading: 0.0        # [rad] earth-fixed mean wave direction

@@ -10,6 +10,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
 
   <depend>rclpy</depend>
+  <depend>python3-yaml</depend>
   <depend>std_msgs</depend>
   <depend>nmpc_interfaces</depend>
   <depend>launch</depend>

@@ -18,7 +18,7 @@ from . import _pkg_paths
 _pkg_paths.ensure_on_path()
 
 from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
-from nmpc.config import DEFAULT_CONFIG  # noqa: E402
+from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 from nmpc.path_following import (  # noqa: E402
     compute_path_angle, compute_cross_track_error, compute_sideslip,
     compute_course_angle, compute_course_error, select_active_waypoint,

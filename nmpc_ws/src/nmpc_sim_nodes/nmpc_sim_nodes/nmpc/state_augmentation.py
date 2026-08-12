@@ -30,10 +30,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from casadi_mmg_solver.casadi_mmg import MMG_Time_Derivative_casadi, make_casadi_integrator
 from nmpc.config import (
-    DEFAULT_CONFIG, STATE_DIM, CONTROL_DIM, MMG_STATE_DIM,
+    STATE_DIM, CONTROL_DIM, MMG_STATE_DIM,
     IDX_EY, IDX_SPSI, IDX_CPSI, IDX_R, IDX_X, IDX_Y, IDX_PSI, IDX_U, IDX_V, IDX_DELTA, IDX_N,
     IDX_DDELTA, IDX_DN,
 )
+from nmpc.params import DEFAULT_CONFIG
 
 
 def augmented_dynamics_casadi(xi_sym, u_aug_sym, chi_p_sym):
