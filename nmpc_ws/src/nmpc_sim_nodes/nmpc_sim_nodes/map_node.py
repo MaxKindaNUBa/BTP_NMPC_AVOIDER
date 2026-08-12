@@ -15,7 +15,7 @@ from . import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 
-from nmpc.config import DEFAULT_CONFIG  # noqa: E402
+from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 from nmpc.path_following import compute_path_angle, select_active_waypoint  # noqa: E402
 
 from nmpc_interfaces.msg import (  # noqa: E402

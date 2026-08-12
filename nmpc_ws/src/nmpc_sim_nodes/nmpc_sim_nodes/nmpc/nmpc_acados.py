@@ -28,10 +28,11 @@ if os.path.exists(_acados_lib_dir):
 from acados_template import AcadosModel, AcadosOcp, AcadosOcpSolver
 
 from nmpc.config import (
-    DEFAULT_CONFIG, STATE_DIM, CONTROL_DIM,
+    STATE_DIM, CONTROL_DIM,
     IDX_EY, IDX_SPSI, IDX_CPSI, IDX_R, IDX_X, IDX_Y, IDX_PSI, IDX_U, IDX_V, IDX_DELTA, IDX_N,
     IDX_DDELTA, IDX_DN,
 )
+from nmpc.params import DEFAULT_CONFIG
 from nmpc.state_augmentation import augmented_dynamics_casadi
 from nmpc.path_following import (
     build_xi_full, pad_obstacles, get_reference_state, wrap180_casadi, compute_effective_u_ref,

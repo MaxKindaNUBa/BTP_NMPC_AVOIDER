@@ -42,7 +42,7 @@ _REFERENCE_QOS = QoSProfile(
 )
 
 _TRAIL_MAX_POINTS = 5000
-_SHIP_LENGTH = 2.902  # LPP; matches nmpc.config.NMPCConfig default
+_SHIP_LENGTH = 2.902  # LPP; matches params/sim_params.yaml's nmpc_node.LPP
 _SHIP_WIDTH = 0.7 * _SHIP_LENGTH * 0.25
 
 # Display-only scale factors: current speed [m/s] and wave force [N] are both
