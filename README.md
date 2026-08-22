@@ -116,7 +116,7 @@ a known-good reference, instead of being debugged blind.
                      │   casadi_mmg.py            │   smoothed, no wave drift
                      │  (+ optional F_env,        │   in the NMPC's own model;
                      │   plant-only, from         │   + acados SimSolver
-                     │   env_node/env_model)      │
+                     │   mmg_node/env_model)      │
                      └────────────┬─────────────┘
                                   │ imported by
                                   ▼
@@ -178,7 +178,8 @@ force/moment, computed outside `casadi_mmg.py` by `env_model/wave_model.py`
 using the same `Wave_Data/*.mat` tables and JONSWAP-spectrum discretization,
 see `WAVE_CURRENT_DISTURBANCE_PLAN.md`) is added straight into the dynamics'
 RHS. Only `mmg_node.py` (the plant integrator) ever passes non-default
-values here, via `env_node`'s `/env/disturbance` service — the NMPC's
+values here — it samples `env_model`'s `CurrentModel`/`WaveModel` in-process,
+toggleable via its own `current_enabled`/`wave_enabled` params — the NMPC's
 prediction model stays disturbance-free, matching the "optimization-friendly
 dynamics are a separate concern from high-fidelity dynamics" argument above.
 
@@ -365,8 +366,8 @@ restructuring this followed):
 nmpc_ws/
   src/
     nmpc_interfaces/            Shared msg/srv definitions for the sim's ROS2 node graph
-    nmpc_sim_nodes/              map_node, nmpc_node, mmg_node, sensor_node, env_node --
-                                  the simulation graph -- plus viz_node / rviz_node
+    nmpc_sim_nodes/              map_node, nmpc_node, mmg_node -- the simulation
+                                  graph -- plus viz_node / rviz_node
                                   (independently launchable live visualizers) and
                                   run_demo / test_nmpc / test_sensor_model /
                                   test_closed_loop_noise / test_env_model /
@@ -377,11 +378,12 @@ nmpc_ws/
                                                 its own README, linked above
       nmpc_sim_nodes/casadi_mmg_solver/       CasADi symbolic MMG port + acados SimSolver
       nmpc_sim_nodes/mpc_visualization/       The matplotlib live-visualization dashboard
-      nmpc_sim_nodes/sensor_model/            GPS/compass/gyro/actuator noise model used
-                                                by sensor_node -- see SENSOR_NOISE_MODEL.md
+      nmpc_sim_nodes/sensor_model/            GPS/compass/gyro/actuator noise model,
+                                                run in-process by mmg_node -- see
+                                                SENSOR_NOISE_MODEL.md
       nmpc_sim_nodes/env_model/               Toggleable current (OU process) + wave
-                                                (JONSWAP + Newman drift) disturbance model
-                                                used by env_node -- see
+                                                (JONSWAP + Newman drift) disturbance model,
+                                                run in-process by mmg_node -- see
                                                 WAVE_CURRENT_DISTURBANCE_PLAN.md
     scenario_maker/               GUI for authoring custom track & obstacle scenarios
     mmg_model_validation/         Standalone NumPy vs CasADi vs acados validation harness
@@ -390,8 +392,11 @@ nmpc_ws/
 Wave_Data/                    Wave-drift force lookup tables (.mat)
 research_papers/              Citations for the papers the NMPC is adapted from
 ROS2_CONVERSION_PLAN.md       The plan the ROS2 restructuring above followed
-SENSOR_NOISE_MODEL.md         Spec for sensor_node's noise model (signals, presets, config)
-WAVE_CURRENT_DISTURBANCE_PLAN.md   Spec for env_node's current/wave disturbance model
+SENSOR_NOISE_MODEL.md         Spec for mmg_node's sensor noise model (signals, presets, config)
+WAVE_CURRENT_DISTURBANCE_PLAN.md   Spec for mmg_node's current/wave disturbance model
+CURRENT_AWARE_NMPC_PAPERS.md  Research survey on feeding current into the NMPC's own
+                                prediction model (disturbance feedforward/rejection) --
+                                notes and literature only, not yet implemented
 ```
 
 Every package/subpackage has its own `README.md` with file-by-file detail;
@@ -407,16 +412,16 @@ added/removed/renamed:
 | Package | Executable | What it does |
 |---|---|---|
 | `nmpc_sim_nodes` | `map_node` | Owns scenario data, active-waypoint bookkeeping, and run-termination logic; part of the core sim graph. |
-| `nmpc_sim_nodes` | `nmpc_node` | Pure NMPC optimizer, serving `/nmpc/solve` (acados or CasADi backend); calls `/sensor/measure` on the incoming state before solving. |
-| `nmpc_sim_nodes` | `mmg_node` | Plant integrator and the master `1/dt` clock; drives the sim loop's timing by calling `/nmpc/solve` each tick. |
-| `nmpc_sim_nodes` | `sensor_node` | Toggleable GPS/compass/gyro/actuator noise model (see `SENSOR_NOISE_MODEL.md`), sitting between the true plant state and what `nmpc_node` solves against. Enabled by default (light preset). |
-| `nmpc_sim_nodes` | `env_node` | Toggleable current (Ornstein-Uhlenbeck) + wave (JONSWAP + Newman's-approximation drift force) disturbance model (see `WAVE_CURRENT_DISTURBANCE_PLAN.md`), serving `/env/disturbance`; `mmg_node` folds its response into the plant integrator only -- the NMPC's own prediction model never sees it. Both toggles default off. |
+| `nmpc_sim_nodes` | `nmpc_node` | Pure NMPC optimizer, serving `/nmpc/solve` (acados or CasADi backend). Only ever receives the *measured* state from `mmg_node` -- it has no path to the plant's true state at all. |
+| `nmpc_sim_nodes` | `mmg_node` | Plant integrator and the master `1/dt` clock. Also owns, in-process (no separate nodes): a toggleable GPS/compass/gyro/actuator noise model (see `SENSOR_NOISE_MODEL.md`, `sensor_enabled`, default on/light preset) applied before every `/nmpc/solve` call, and a toggleable current (Ornstein-Uhlenbeck) + wave (JONSWAP + Newman's-approximation drift force) disturbance model (see `WAVE_CURRENT_DISTURBANCE_PLAN.md`, `current_enabled`/`wave_enabled`, both default off) folded into the plant integrator only -- the NMPC's own prediction model never sees it. |
+| `nmpc_sim_nodes` | `logger_node` | Synchronous experiment logger; captures metadata, scenario copy, timeseries telemetry CSV, prediction horizons NPZ, and summary JSON, plus (via `ControllerEffortLogger`, fed off `nmpc_node`'s `/nmpc/controller_effort_raw` topic on its own background thread) a per-step Q/R cost breakdown and control-effort diagnostics in `costs_errors.csv`, folded into the same run's `summary.json`. Automatically launched with `bringup.launch.py`. |
 | `nmpc_sim_nodes` | `viz_node` | Standalone live matplotlib dashboard; late-joins a running sim via `/map/get_scenario` + topics, independent of the map/nmpc/mmg nodes. |
 | `nmpc_sim_nodes` | `rviz_node` | Republishes the sim's own topics as `visualization_msgs/MarkerArray` so RViz2 can render the same simulation. |
+| `nmpc_sim_nodes` | `hud_node` | Standalone matplotlib companion window (current compass, wave-force scatter, NMPC control-horizon graph); run alongside `rviz_node`/RViz2 or `viz_node`. |
 | `nmpc_sim_nodes` | `run_demo` | Standalone mock-data demo of the visualization dashboard (fake circular-motion ship, no real NMPC or sim node graph). |
 | `nmpc_sim_nodes` | `test_nmpc` | Closed-loop NMPC validation harness, no obstacles; produces plots under `~/nmpc_sim_logs/test_nmpc_results/`. |
-| `nmpc_sim_nodes` | `test_sensor_model` | Standalone true-vs-measured comparison for `sensor_node`'s noise model; no other node needs to be running. Produces plots/CSVs under `~/nmpc_sim_logs/test_sensor_model_results/`. |
-| `nmpc_sim_nodes` | `test_closed_loop_noise` | Standalone headless run of the full pipeline (acados NMPC + MMG plant integrator) on `scenario.json`, twice -- once with no noise, once with `sensor_node`'s light preset -- at accelerated (unthrottled) speed. Produces a path-comparison plot under `~/nmpc_sim_logs/test_closed_loop_noise_results/`. |
+| `nmpc_sim_nodes` | `test_sensor_model` | Standalone true-vs-measured comparison for `mmg_node`'s sensor noise model; no other node needs to be running. Produces plots/CSVs under `~/nmpc_sim_logs/test_sensor_model_results/`. |
+| `nmpc_sim_nodes` | `test_closed_loop_noise` | Standalone headless run of the full pipeline (acados NMPC + MMG plant integrator) on `scenario.json`, twice -- once with no noise, once with the light noise preset -- at accelerated (unthrottled) speed. Produces a path-comparison plot under `~/nmpc_sim_logs/test_closed_loop_noise_results/`. |
 | `nmpc_sim_nodes` | `test_env_model` | Standalone unit-level check of `env_model`'s `CurrentModel`/`WaveModel`, no ROS graph or plant integrator needed. Produces plots under `~/nmpc_sim_logs/test_env_model_results/`. |
 | `nmpc_sim_nodes` | `test_closed_loop_env` | Standalone headless run of the full pipeline (acados NMPC + MMG plant integrator) on `scenario.json`, four times -- no disturbance, wave only, current only, and current+wave (each using `env_model`'s default `CurrentModel`/`WaveModel`, with matching seeds so each disturbance's marginal effect is isolated) -- at accelerated (unthrottled) speed. Produces a single 4-path comparison plot under `~/nmpc_sim_logs/test_closed_loop_env_results/`. |
 | `scenario_maker` | `scenario_editor` | GUI for authoring custom start/waypoints/goal/obstacle scenarios, saved as `scenario.json`. |
@@ -426,7 +431,7 @@ Every `ros2 launch <package> <file>` currently defined in `nmpc_ws/src/`:
 
 | Package | Launch file | What it launches |
 |---|---|---|
-| `nmpc_sim_nodes` | `bringup.launch.py` | The core sim graph: `map_node`, `nmpc_node`, `mmg_node`, `sensor_node`, `env_node`, all sharing one `params_file` launch argument (defaults to `params/sim_params.yaml`). |
+| `nmpc_sim_nodes` | `bringup.launch.py` | The core sim graph: `map_node`, `nmpc_node`, `mmg_node`, `logger_node`, all sharing one `params_file` launch argument (defaults to `params/sim_params.yaml`). |
 
 ## Getting started
 
@@ -441,7 +446,8 @@ cd nmpc_ws && python3 -m colcon build
 source /opt/ros/jazzy/setup.bash
 source nmpc_ws/install/setup.bash
 
-# 3. Launch the simulation graph: map_node + nmpc_node + mmg_node + sensor_node + env_node
+# 3. Launch the simulation graph: map_node + nmpc_node + mmg_node (sensor noise +
+#    current/wave disturbance run in-process inside mmg_node)
 ros2 launch nmpc_sim_nodes bringup.launch.py
 
 # 4. Watch it live, in a separate terminal -- matplotlib dashboard...
@@ -497,24 +503,25 @@ different machine.
 - Obstacle avoidance exercised end-to-end against the scenario's obstacles
   (not just an empty list), via `test_closed_loop_noise`'s headless full-pipeline
   rollout.
-- A toggleable sensor noise model (`sensor_node`/`sensor_model`, see
-  [`SENSOR_NOISE_MODEL.md`](SENSOR_NOISE_MODEL.md)) sitting between the true
-  plant state and what the NMPC solves against — GPS/compass/gyro/actuator
-  noise, with standalone comparison harnesses (`test_sensor_model`,
-  `test_closed_loop_noise`) for viewing its effect with and without noise.
-- A toggleable current + wave disturbance model (`env_node`/`env_model`, see
-  [`WAVE_CURRENT_DISTURBANCE_PLAN.md`](WAVE_CURRENT_DISTURBANCE_PLAN.md))
-  applied only to the plant integrator, never the NMPC's own prediction
-  model — a mean-reverting current velocity plus a JONSWAP-spectrum wave
-  drift force/moment, with standalone comparison harnesses (`test_env_model`,
-  `test_closed_loop_env`) for viewing its effect with and without the
-  disturbance.
+- A toggleable sensor noise model (`mmg_node`/`sensor_model`, see
+  [`SENSOR_NOISE_MODEL.md`](SENSOR_NOISE_MODEL.md)), run in-process by
+  `mmg_node` between the true plant state and what the NMPC solves against —
+  GPS/compass/gyro/actuator noise, with standalone comparison harnesses
+  (`test_sensor_model`, `test_closed_loop_noise`) for viewing its effect with
+  and without noise.
+- A toggleable current + wave disturbance model (`mmg_node`/`env_model`, see
+  [`WAVE_CURRENT_DISTURBANCE_PLAN.md`](WAVE_CURRENT_DISTURBANCE_PLAN.md)),
+  also run in-process by `mmg_node` and applied only to the plant integrator,
+  never the NMPC's own prediction model — a mean-reverting current velocity
+  plus a JONSWAP-spectrum wave drift force/moment, with standalone comparison
+  harnesses (`test_env_model`, `test_closed_loop_env`) for viewing its effect
+  with and without the disturbance.
 
 **Known open bug:**
 - The low-speed MMG singularity described above, which can freeze the
   acados solver during a slow pivot near a target.
 
-**Known gap:** the NMPC currently reads `sensor_node`'s raw, unfiltered noisy
+**Known gap:** the NMPC currently reads `mmg_node`'s raw, unfiltered noisy
 measurement straight into the solver's initial-state constraint every tick,
 with no state estimator in between. This is fine at the light noise preset,
 but an earlier, noisier "heavy" preset (large enough that differentiated

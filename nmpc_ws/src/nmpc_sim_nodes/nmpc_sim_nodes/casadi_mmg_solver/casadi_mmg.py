@@ -123,9 +123,17 @@ def MMG_Time_Derivative_casadi(state, control, current=(0.0, 0.0), wave_force=(0
     )
 
     ### LHS ### (Other than u_dot,v_dot,r_dot)
+    # Split by physical origin, not lumped at a single velocity: the rigid-body
+    # Coriolis/centripetal piece (mass m) is a purely kinematic consequence of
+    # differentiating momentum in a frame rotating with the hull -- it exists
+    # with no water at all, so it uses absolute (ground-relative) velocity,
+    # same as Vel_Mom's kinematics below. The added-mass piece (mx, my) is a
+    # hydrodynamic fluid-reaction term -- it uses water-relative velocity
+    # (ur, vr), same convention as F_hull/F_propellar/F_rudder above. With no
+    # current (ur=u_val, vr=v) this reduces exactly to the previous lumped form.
     LHS_r = ca.vertcat(
-        -(m+my)*v*r - xG*m*(r**2),
-        (m+mx)*u_val*r,
+        -m*v*r - xG*m*(r**2) - my*vr*r,
+        m*u_val*r + mx*ur*r,
         m*xG*u_val*r
     )
 

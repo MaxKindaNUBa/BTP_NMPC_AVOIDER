@@ -29,7 +29,8 @@ from .. import _pkg_paths
 _pkg_paths.ensure_on_path()
 
 from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
-from sensor_model.config import PRESETS  # noqa: E402
+from nmpc.params import DEFAULT_CONFIG  # noqa: E402
+from sensor_model.config import load_preset_and_seed  # noqa: E402
 from sensor_model.sensor_model import SensorModel  # noqa: E402
 
 RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_sensor_model_results")
@@ -92,10 +93,11 @@ def run_true_trajectory(dt: float, sim_time: float) -> dict:
     return log
 
 
-def run_noisy(log_true: dict, preset_name: str, seed: int, dt: float) -> dict:
+def run_noisy(log_true: dict, preset, seed: int, dt: float) -> dict:
     """Feeds every true sample through SensorModel.measure() -- the exact
-    same call sensor_node makes per /sensor/measure request when enabled."""
-    model = SensorModel(PRESETS[preset_name], dt, seed)
+    same call sensor_node makes per /sensor/measure request when enabled.
+    `preset` is a SensorNoiseConfig, e.g. from sensor_model.config.load_preset_and_seed()."""
+    model = SensorModel(preset, dt, seed)
     n_steps = len(log_true["t"])
     log = {k: np.zeros(n_steps) for k, _, _ in _SIGNALS}
 
@@ -174,8 +176,10 @@ def plot_trajectory_xy(log_true: dict, log_noisy: dict, preset_name: str, out_pa
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sim-time", type=float, default=90.0, help="maneuver duration in seconds (default: 90)")
-    parser.add_argument("--dt", type=float, default=0.1, help="integration/measurement step (default: 0.1, matches sim_params.yaml)")
-    parser.add_argument("--seed", type=int, default=42, help="sensor_model RNG seed (default: 42)")
+    parser.add_argument("--dt", type=float, default=DEFAULT_CONFIG.dt,
+                         help="integration/measurement step (default: sim_params.yaml's nmpc_node.dt)")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="override sensor_model RNG seed; default: use sim_params.yaml's own sensor_seed")
     parser.add_argument("--results-dir", default=RESULTS_DIR, help="where to write plots/CSVs")
     args = parser.parse_args(argv)
 
@@ -184,8 +188,8 @@ def main(argv=None):
     print(f"--- Building true trajectory: sim_time={args.sim_time}s, dt={args.dt}s ---")
     log_true = run_true_trajectory(args.dt, args.sim_time)
 
-    preset_name = "light"
-    log_noisy = run_noisy(log_true, preset_name, args.seed, args.dt)
+    preset_name, preset, sensor_seed = load_preset_and_seed(seed=args.seed)
+    log_noisy = run_noisy(log_true, preset, sensor_seed, args.dt)
 
     ts_path = os.path.join(args.results_dir, f"{preset_name}_timeseries.png")
     traj_path = os.path.join(args.results_dir, f"{preset_name}_trajectory.png")

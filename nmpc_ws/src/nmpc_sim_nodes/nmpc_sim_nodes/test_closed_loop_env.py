@@ -43,24 +43,11 @@ from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 from nmpc.nmpc_acados import AcadosNMPC  # noqa: E402
 from nmpc.path_following import compute_path_angle, select_active_waypoint  # noqa: E402
-from env_model.config import CurrentConfig, WaveConfig  # noqa: E402
+from env_model.config import load_current_config, load_wave_config  # noqa: E402
 from env_model.current_model import CurrentModel  # noqa: E402
 from env_model.wave_model import WaveModel  # noqa: E402
 
 RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_closed_loop_env_results")
-
-# env_model's own config defaults (mirrors sim_params.yaml's env_node section
-# values -- see WAVE_CURRENT_DISTURBANCE_PLAN.md section 8).
-_DEFAULT_CURRENT_MEAN_SPEED = 0.0
-_DEFAULT_CURRENT_MEAN_HEADING = 0.0
-_DEFAULT_CURRENT_TIME_CONSTANT = 600.0
-_DEFAULT_CURRENT_SIGMA = 0.01
-
-_DEFAULT_WAVE_HS = 0.05
-_DEFAULT_WAVE_TP = 1.2
-_DEFAULT_WAVE_GAMMA = 3.3
-_DEFAULT_WAVE_MEAN_HEADING = 0.0
-_DEFAULT_WAVE_NUM_COMPONENTS = 30
 
 # (label, use_current, use_wave, plot color) -- run order and plot styling.
 _SCENARIOS = [
@@ -97,24 +84,16 @@ def _reset_solver(nmpc: AcadosNMPC):
     nmpc._last_n = nmpc.config.N_TRIM
 
 
-def _make_current_model(seed: int) -> CurrentModel:
-    config = CurrentConfig(
-        mean_vx=_DEFAULT_CURRENT_MEAN_SPEED * np.cos(_DEFAULT_CURRENT_MEAN_HEADING),
-        mean_vy=_DEFAULT_CURRENT_MEAN_SPEED * np.sin(_DEFAULT_CURRENT_MEAN_HEADING),
-        time_constant_s=_DEFAULT_CURRENT_TIME_CONSTANT,
-        sigma=_DEFAULT_CURRENT_SIGMA,
-        seed=seed,
-    )
-    return CurrentModel(config)
+def _make_current_model(seed) -> CurrentModel:
+    """seed=None uses sim_params.yaml's own current_seed -- mean/Tc/sigma
+    always come from the yaml, never a copy kept in this file."""
+    return CurrentModel(load_current_config(seed=seed))
 
 
-def _make_wave_model(seed: int, dt: float) -> WaveModel:
-    config = WaveConfig(
-        hs=_DEFAULT_WAVE_HS, tp=_DEFAULT_WAVE_TP, gamma=_DEFAULT_WAVE_GAMMA,
-        mean_heading=_DEFAULT_WAVE_MEAN_HEADING, num_components=_DEFAULT_WAVE_NUM_COMPONENTS,
-        seed=seed,
-    )
-    return WaveModel(config, dt)
+def _make_wave_model(seed, dt: float) -> WaveModel:
+    """seed=None uses sim_params.yaml's own wave_seed -- hs/tp/gamma/... always
+    come from the yaml, never a copy kept in this file."""
+    return WaveModel(load_wave_config(seed=seed), dt)
 
 
 def run_closed_loop(nmpc: AcadosNMPC, scenario: dict, current_model, wave_model) -> dict:
@@ -208,7 +187,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     default_scenario = os.path.join(get_package_share_directory("nmpc_sim_nodes"), "params", "scenario.json")
     parser.add_argument("--scenario-path", default=default_scenario, help="scenario.json to run (default: the package's own)")
-    parser.add_argument("--seed", type=int, default=42, help="CurrentModel RNG seed (WaveModel uses seed+1); shared across every run that includes that component (default: 42)")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="override CurrentModel RNG seed (WaveModel uses seed+1); "
+                              "default: use sim_params.yaml's own current_seed/wave_seed")
     parser.add_argument("--results-dir", default=RESULTS_DIR, help="where to write the comparison plot")
     args = parser.parse_args(argv)
 
@@ -223,8 +204,9 @@ def main(argv=None):
         if i > 1:
             _reset_solver(nmpc)
 
+        wave_seed = (args.seed + 1) if args.seed is not None else None
         current_model = _make_current_model(args.seed) if use_current else None
-        wave_model = _make_wave_model(args.seed + 1, DEFAULT_CONFIG.dt) if use_wave else None
+        wave_model = _make_wave_model(wave_seed, DEFAULT_CONFIG.dt) if use_wave else None
 
         print(f"--- Run {i}/{len(_SCENARIOS)}: {label} ---")
         t0 = time.perf_counter()

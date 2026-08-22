@@ -37,7 +37,7 @@ from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 from nmpc.nmpc_acados import AcadosNMPC  # noqa: E402
 from nmpc.path_following import compute_path_angle, select_active_waypoint  # noqa: E402
-from sensor_model.config import PRESETS  # noqa: E402
+from sensor_model.config import load_preset_and_seed  # noqa: E402
 from sensor_model.sensor_model import SensorModel  # noqa: E402
 
 RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_closed_loop_noise_results")
@@ -158,7 +158,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     default_scenario = os.path.join(get_package_share_directory("nmpc_sim_nodes"), "params", "scenario.json")
     parser.add_argument("--scenario-path", default=default_scenario, help="scenario.json to run (default: the package's own)")
-    parser.add_argument("--seed", type=int, default=42, help="sensor_model RNG seed for the light-noise run (default: 42)")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="override sensor_model RNG seed for the noisy run; "
+                              "default: use sim_params.yaml's own sensor_seed")
     parser.add_argument("--results-dir", default=RESULTS_DIR, help="where to write the comparison plot")
     args = parser.parse_args(argv)
 
@@ -176,9 +178,10 @@ def main(argv=None):
           f"wall_time={wall_clean:.1f}s, speedup={log_clean['final_t'] / wall_clean:.1f}x")
 
     _reset_solver(nmpc)
-    sensor_model = SensorModel(PRESETS["light"], DEFAULT_CONFIG.dt, args.seed)
+    preset_name, preset, sensor_seed = load_preset_and_seed(seed=args.seed)
+    sensor_model = SensorModel(preset, DEFAULT_CONFIG.dt, sensor_seed)
 
-    print("--- Run 2/2: light sensor noise ---")
+    print(f"--- Run 2/2: sensor noise ({preset_name} preset) ---")
     t0 = time.perf_counter()
     log_noisy = run_closed_loop(nmpc, scenario, sensor_model=sensor_model)
     wall_noisy = time.perf_counter() - t0

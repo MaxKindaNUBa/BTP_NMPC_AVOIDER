@@ -22,6 +22,7 @@ from . import _pkg_paths
 _pkg_paths.ensure_on_path()
 
 from nmpc.config import IDX_X, IDX_Y  # noqa: E402
+from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
 from nmpc_interfaces.msg import (ActiveReference, CurrentState, ObstacleArray, PredictionHorizon,  # noqa: E402
                                   SimStatus, VesselState, WaveState)
@@ -42,7 +43,7 @@ _REFERENCE_QOS = QoSProfile(
 )
 
 _TRAIL_MAX_POINTS = 5000
-_SHIP_LENGTH = 2.902  # LPP; matches params/sim_params.yaml's nmpc_node.LPP
+_SHIP_LENGTH = DEFAULT_CONFIG.LPP  # sim_params.yaml's nmpc_node.LPP, never a separate copy
 _SHIP_WIDTH = 0.7 * _SHIP_LENGTH * 0.25
 
 # Display-only scale factors: current speed [m/s] and wave force [N] are both

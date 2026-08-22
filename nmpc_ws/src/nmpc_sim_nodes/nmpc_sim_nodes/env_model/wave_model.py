@@ -99,8 +99,21 @@ class WaveModel:
 
         omega_p = 2.0 * np.pi / config.tp
         n = int(config.num_components)
-        self.omega = np.linspace(0.4 * omega_p, 3.0 * omega_p, n)
-        self.domega = float(self.omega[1] - self.omega[0]) if n > 1 else 0.0
+        omega_grid = np.linspace(0.4 * omega_p, 3.0 * omega_p, n)
+        self.domega = float(omega_grid[1] - omega_grid[0]) if n > 1 else 0.0
+        # Equally-spaced omega_i (the raw linspace grid) would make every
+        # (omega_i - omega_j) an exact multiple of domega, so the Newman
+        # slow-drift double sum's cos((omega_i-omega_j)*t + ...) term becomes
+        # an exactly periodic function of t with period 2*pi/domega -- a
+        # well-known artifact of equal-frequency discretization in irregular
+        # wave synthesis (the whole force trace repeats itself every ~13s at
+        # this hull's default Tp, regardless of the randomized phases below).
+        # Jittering each component within its own bin breaks that
+        # commensurability while leaving the Riemann-sum integration
+        # (S(omega_i)*domega) just as valid -- S is still sampled once per
+        # equal-width bin, only the sample point inside the bin moves.
+        jitter = rng.uniform(-0.5 * self.domega, 0.5 * self.domega, size=n) if n > 1 else np.zeros(n)
+        self.omega = omega_grid + jitter
         self.S = _jonswap_spectrum(self.omega, config.hs, config.tp, config.gamma)
         self.phase = rng.uniform(0.0, 2.0 * np.pi, size=n)
 
