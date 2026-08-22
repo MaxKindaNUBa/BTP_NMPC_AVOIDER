@@ -1,7 +1,20 @@
 """mmg_node: owns the plant integrator and the master 1/dt clock (section 2.7 /
-2.3 of ROS2_CONVERSION_PLAN.md). Each tick: call /nmpc/solve and block, apply
-the returned (delta, n), integrate one RK4 step, publish the new state.
+2.3 of ROS2_CONVERSION_PLAN.md). Each tick: measure the true state (sensor
+noise, in-process), call /nmpc/solve with that measured state and block,
+apply the returned (delta, n), sample the current/wave disturbance
+(in-process), integrate one true-state RK4 step, publish the new true state.
+
+Sensor noise (formerly sensor_node) and current/wave disturbance (formerly
+env_node) live directly in this node now -- no separate ROS2 nodes, no
+/sensor/measure or /env/disturbance RPCs. Both remain independently
+toggleable via parameters (sensor_enabled, current_enabled, wave_enabled),
+same semantics as before: disabled means pass-through/zero, not a partial
+mode. This also enforces, by construction, that nmpc_node can never see the
+true state: the only field on /nmpc/solve's request (VesselState state) is
+always populated from the measured state computed here, never from
+self.mmg_state.
 """
+import math
 import time
 
 import numpy as np
@@ -18,8 +31,15 @@ _pkg_paths.ensure_on_path()
 import casadi as ca  # noqa: E402
 from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
 
-from nmpc_interfaces.msg import SimStatus, VesselState  # noqa: E402
-from nmpc_interfaces.srv import GetEnvDisturbance, ResetSim, SolveNMPC  # noqa: E402
+from nmpc_interfaces.msg import CurrentState, SimStatus, VesselState, WaveState  # noqa: E402
+from nmpc_interfaces.srv import ResetSim, SolveNMPC  # noqa: E402
+
+from env_model.config import CurrentConfig, WaveConfig  # noqa: E402
+from env_model.current_model import CurrentModel  # noqa: E402
+from env_model.wave_model import WaveModel  # noqa: E402
+
+from sensor_model.config import PRESETS  # noqa: E402
+from sensor_model.sensor_model import SensorModel  # noqa: E402
 
 _LATCHED_QOS = QoSProfile(
     depth=1,
@@ -42,6 +62,9 @@ class MmgNode(Node):
 
         self.plant_step = make_casadi_integrator(self.dt, method='rk4', sym_type=ca.SX, with_env=True)
 
+        self._init_sensor_model()
+        self._init_env_models()
+
         self.mmg_state = None          # np.ndarray[6], seeded from /map/initial_state
         self.delta = None
         self.n = None
@@ -58,9 +81,11 @@ class MmgNode(Node):
         self._misc_cbg = ReentrantCallbackGroup()
 
         self.state_pub = self.create_publisher(VesselState, '/mmg/state', 10)
+        self.measured_pub = self.create_publisher(VesselState, '/sensor/measured_state', 10)
+        self.current_pub = self.create_publisher(CurrentState, '/env/current_state', 10)
+        self.wave_pub = self.create_publisher(WaveState, '/env/wave_state', 10)
 
         self.solve_client = self.create_client(SolveNMPC, '/nmpc/solve', callback_group=self._client_cbg)
-        self.env_client = self.create_client(GetEnvDisturbance, '/env/disturbance', callback_group=self._client_cbg)
 
         # transient-local: mmg_node's tick loop is gated on seeing RUNNING at
         # least once, so a late subscription must still get map_node's last
@@ -75,7 +100,70 @@ class MmgNode(Node):
 
         self.timer = self.create_timer(self.dt, self._tick, callback_group=self._timer_cbg)
 
-        self.get_logger().info(f'mmg_node up, dt={self.dt}s, waiting for /map/initial_state...')
+        self.get_logger().info(
+            f'mmg_node up, dt={self.dt}s, sensor_enabled={self._sensor_enabled}, '
+            f'current_enabled={self.current_model is not None}, wave_enabled={self.wave_model is not None}, '
+            f'waiting for /map/initial_state...')
+
+    # ------------------------------------------------------------------
+    def _init_sensor_model(self):
+        self.declare_parameter('sensor_enabled', False)
+        self.declare_parameter('sensor_preset', 'light')
+        self.declare_parameter('sensor_seed', 42)
+
+        self._sensor_enabled = bool(self.get_parameter('sensor_enabled').value)
+        preset_name = str(self.get_parameter('sensor_preset').value)
+        if preset_name not in PRESETS:
+            raise ValueError(f"Unknown sensor_model preset {preset_name!r}; expected one of {list(PRESETS)}")
+        sensor_seed = int(self.get_parameter('sensor_seed').value)
+
+        # Always constructed (matching the old sensor_node.py's own pattern),
+        # gated only at use time in _measure() -- disabled means pass-through,
+        # not "no model at all".
+        self.sensor_model = SensorModel(PRESETS[preset_name], self.dt, sensor_seed)
+
+    def _init_env_models(self):
+        self.declare_parameter('current_enabled', False)
+        self.declare_parameter('current_mean_speed', 0.0)
+        self.declare_parameter('current_mean_heading', 0.0)
+        self.declare_parameter('current_time_constant', 600.0)
+        self.declare_parameter('current_sigma', 0.01)
+        self.declare_parameter('current_seed', 7)
+
+        self.declare_parameter('wave_enabled', False)
+        self.declare_parameter('wave_hs', 0.05)
+        self.declare_parameter('wave_tp', 1.2)
+        self.declare_parameter('wave_gamma', 3.3)
+        self.declare_parameter('wave_mean_heading', 0.0)
+        self.declare_parameter('wave_num_components', 30)
+        self.declare_parameter('wave_seed', 11)
+
+        self.current_enabled = bool(self.get_parameter('current_enabled').value)
+        self.current_model = None
+        if self.current_enabled:
+            speed = float(self.get_parameter('current_mean_speed').value)
+            heading = float(self.get_parameter('current_mean_heading').value)
+            current_config = CurrentConfig(
+                mean_vx=speed * math.cos(heading),
+                mean_vy=speed * math.sin(heading),
+                time_constant_s=float(self.get_parameter('current_time_constant').value),
+                sigma=float(self.get_parameter('current_sigma').value),
+                seed=int(self.get_parameter('current_seed').value),
+            )
+            self.current_model = CurrentModel(current_config)
+
+        self.wave_enabled = bool(self.get_parameter('wave_enabled').value)
+        self.wave_model = None
+        if self.wave_enabled:
+            wave_config = WaveConfig(
+                hs=float(self.get_parameter('wave_hs').value),
+                tp=float(self.get_parameter('wave_tp').value),
+                gamma=float(self.get_parameter('wave_gamma').value),
+                mean_heading=float(self.get_parameter('wave_mean_heading').value),
+                num_components=int(self.get_parameter('wave_num_components').value),
+                seed=int(self.get_parameter('wave_seed').value),
+            )
+            self.wave_model = WaveModel(wave_config, self.dt)
 
     # ------------------------------------------------------------------
     def _on_initial_state(self, msg: VesselState):
@@ -112,12 +200,72 @@ class MmgNode(Node):
         msg.n = float(n)
         return msg
 
+    def _measure(self, true_msg: VesselState) -> VesselState:
+        """In-process replacement for the old sensor_node's /sensor/measure
+        service: true_msg in, (possibly corrupted) measured VesselState out.
+        Also publishes /sensor/measured_state, same as sensor_node did."""
+        if not self._sensor_enabled:
+            measured = true_msg
+        else:
+            mmg_state = [true_msg.u, true_msg.v, true_msg.r, true_msg.x, true_msg.y, true_msg.psi]
+            mmg_state_meas, delta_meas, n_meas = self.sensor_model.measure(mmg_state, true_msg.delta, true_msg.n)
+
+            measured = VesselState()
+            measured.header.stamp = self.get_clock().now().to_msg()
+            measured.header.frame_id = true_msg.header.frame_id
+            measured.u, measured.v, measured.r, measured.x, measured.y, measured.psi = \
+                [float(v) for v in mmg_state_meas]
+            measured.delta = float(delta_meas)
+            measured.n = float(n_meas)
+
+        self.measured_pub.publish(measured)
+        return measured
+
+    def _sample_disturbance(self, psi: float, stamp, frame_id: str):
+        """In-process replacement for the old env_node's /env/disturbance
+        service: samples current/wave off the true heading, publishes
+        /env/current_state and /env/wave_state (same as env_node did), and
+        returns (current, wave_force) tuples for the plant integrator."""
+        current_msg = CurrentState()
+        current_msg.header.stamp = stamp
+        current_msg.header.frame_id = frame_id
+        current_msg.enabled = self.current_enabled
+        if self.current_enabled:
+            vx, vy = self.current_model.step(self.dt)
+            current_msg.vx, current_msg.vy = float(vx), float(vy)
+            current_msg.speed = float(math.hypot(vx, vy))
+            current_msg.heading = float(math.atan2(vy, vx))
+        else:
+            current_msg.vx = current_msg.vy = current_msg.speed = current_msg.heading = 0.0
+
+        wave_msg = WaveState()
+        wave_msg.header.stamp = stamp
+        wave_msg.header.frame_id = frame_id
+        wave_msg.enabled = self.wave_enabled
+        if self.wave_enabled:
+            fx, fy, fn = self.wave_model.force(psi)
+            wave_msg.hs = float(self.wave_model.config.hs)
+            wave_msg.tp = float(self.wave_model.config.tp)
+            wave_msg.mean_heading = float(self.wave_model.config.mean_heading)
+            wave_msg.fx, wave_msg.fy, wave_msg.fn = float(fx), float(fy), float(fn)
+        else:
+            wave_msg.hs = wave_msg.tp = wave_msg.mean_heading = 0.0
+            wave_msg.fx = wave_msg.fy = wave_msg.fn = 0.0
+
+        self.current_pub.publish(current_msg)
+        self.wave_pub.publish(wave_msg)
+
+        return (current_msg.vx, current_msg.vy), (wave_msg.fx, wave_msg.fy, wave_msg.fn)
+
     def _tick(self):
         if not self._have_initial_state or not self._running:
             return
 
+        true_msg = self._state_msg(self.mmg_state, self.delta, self.n)
+        measured_msg = self._measure(true_msg)
+
         request = SolveNMPC.Request()
-        request.state = self._state_msg(self.mmg_state, self.delta, self.n)
+        request.state = measured_msg
 
         if not self.solve_client.service_is_ready():
             self.get_logger().warn('/nmpc/solve not available yet, skipping tick', throttle_duration_sec=2.0)
@@ -139,26 +287,8 @@ class MmgNode(Node):
         response = future.result()
         delta, n = response.command.delta, response.command.n
 
-        current, wave_force = (0.0, 0.0), (0.0, 0.0, 0.0)
-        if not self.env_client.service_is_ready():
-            self.get_logger().warn('/env/disturbance not available yet, using zero disturbance this tick',
-                                    throttle_duration_sec=2.0)
-        else:
-            env_request = GetEnvDisturbance.Request()
-            env_request.state = request.state
-            env_future = self.env_client.call_async(env_request)
-            # same busy-wait pattern as /nmpc/solve above, and for the same
-            # reason (this callback runs inside the node's own executor).
-            while rclpy.ok() and not env_future.done():
-                time.sleep(0.0005)
-            if not rclpy.ok():
-                return
-            if env_future.exception() is not None:
-                self.get_logger().error(f'/env/disturbance call failed: {env_future.exception()}')
-            else:
-                env_response = env_future.result()
-                current = (env_response.current.vx, env_response.current.vy)
-                wave_force = (env_response.wave.fx, env_response.wave.fy, env_response.wave.fn)
+        current, wave_force = self._sample_disturbance(
+            float(self.mmg_state[5]), true_msg.header.stamp, true_msg.header.frame_id)
 
         state_ca = ca.DM(self.mmg_state)
         control_ca = ca.DM([delta, n])

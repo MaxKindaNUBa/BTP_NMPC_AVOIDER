@@ -202,8 +202,11 @@ class AcadosNMPC:
 
         u_ref_eff = compute_effective_u_ref(mmg_state[3], mmg_state[4], x_d, y_d, cfg.U_REF, cfg)
         xi_ref = get_reference_state(chi_p, x_d, y_d, u_ref_eff, cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
-        xi_ref = _yref_wrap_psi(xi_ref)  # psi row target is 0 (wrapped residual baked into cost_y_expr)
-        yref = np.concatenate([xi_ref, np.zeros(CONTROL_DIM)])
+        # xi_ref (unwrapped, psi row = chi_p) is kept as-is for the return dict below
+        # (controller-effort logging); acados' own NONLINEAR_LS cost needs the
+        # separate psi-zeroed copy instead (wrapped residual baked into cost_y_expr).
+        xi_ref_cost = _yref_wrap_psi(xi_ref)
+        yref = np.concatenate([xi_ref_cost, np.zeros(CONTROL_DIM)])
 
         # pin the initial state to the actual current state (standard MPC shrinking-horizon setup)
         self.solver.set(0, "lbx", xi_0)
@@ -213,7 +216,7 @@ class AcadosNMPC:
         for k in range(self.N):
             self.solver.set(k, "yref", yref)
             self.solver.set(k, "p", params)
-        self.solver.set(self.N, "yref", xi_ref)
+        self.solver.set(self.N, "yref", xi_ref_cost)
         self.solver.set(self.N, "p", params)
 
         t0 = time.perf_counter()
@@ -239,6 +242,7 @@ class AcadosNMPC:
         return {
             "u_opt": u_traj,
             "xi_traj": xi_traj,
+            "xi_ref": xi_ref,
             "delta": float(delta_new),
             "n": float(n_new),
             "solve_time": solve_time,

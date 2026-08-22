@@ -4,19 +4,20 @@ the latest /map/active_reference and /map/obstacles for use inside the next
 solve() call; also broadcasts the same result on three topics for passive
 consumers (viz_node, diagnostics).
 
-Also acts as the client of /sensor/measure (SENSOR_NOISE_MODEL.md /
-ROS2_CONVERSION_PLAN.md section 8): before solving, the true VesselState
-carried in the request is passed through sensor_node, and the (possibly
-corrupted) result is what the solver actually sees -- so "the controller
-only ever sees corrupted measurements", never the plant's true state,
-regardless of whether sensor_node's noise is enabled or disabled.
+/nmpc/solve's request.state is always the *measured* state -- mmg_node runs
+the sensor noise model (SENSOR_NOISE_MODEL.md) in-process before calling this
+service, so "the controller only ever sees corrupted measurements" holds by
+construction: this node has no path to the plant's true state at all (no
+/mmg/state subscription, no true-state field on the request), regardless of
+whether mmg_node's sensor noise is enabled or disabled.
 """
 import dataclasses
-import time
+import queue
+import threading
 
 import numpy as np
 import rclpy
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
@@ -28,9 +29,9 @@ _pkg_paths.ensure_on_path()
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
 from nmpc_interfaces.msg import (  # noqa: E402
-    ActiveReference, ControlCommand, ObstacleArray, PredictionHorizon, SolverStatus,
+    ActiveReference, ControlCommand, ControllerEffortSample, ObstacleArray, PredictionHorizon, SolverStatus,
 )
-from nmpc_interfaces.srv import MeasureState, SolveNMPC  # noqa: E402
+from nmpc_interfaces.srv import SolveNMPC  # noqa: E402
 
 # matches map_node's /map/obstacles QoS (section 2.5: "transient-local, depth 1 -- latched")
 _OBSTACLES_QOS = QoSProfile(
@@ -46,6 +47,20 @@ _REFERENCE_QOS = QoSProfile(
     durability=QoSDurabilityPolicy.VOLATILE,
     history=QoSHistoryPolicy.KEEP_LAST,
 )
+# Controller-effort raw stream (consumed by logger_node's ControllerEffortLogger,
+# see controller_effort_logger.py): BEST_EFFORT + shallow KEEP_LAST so a slow or
+# absent subscriber can never back-pressure this publisher -- a full DDS queue
+# just drops the oldest sample instead of blocking publish().
+_EFFORT_QOS = QoSProfile(
+    depth=200,
+    reliability=QoSReliabilityPolicy.BEST_EFFORT,
+    durability=QoSDurabilityPolicy.VOLATILE,
+    history=QoSHistoryPolicy.KEEP_LAST,
+)
+# Bound on nmpc_node's own pre-publish queue (see _effort_publish_worker below);
+# independent of _EFFORT_QOS's depth, since this one guards against the publish
+# call itself (message construction/serialization) ever running on the solve thread.
+_EFFORT_QUEUE_MAXSIZE = 200
 
 # NMPCConfig fields (nmpc/config.py:48-149) that pass straight through to a ROS2
 # parameter of the same name. WP_RADIUS/SIM_TIME_MODE/SIM_TIME_FIXED are owned by
@@ -101,19 +116,28 @@ class NmpcNode(Node):
         self.control_pub = self.create_publisher(ControlCommand, '/nmpc/control_command', 10)
         self.horizon_pub = self.create_publisher(PredictionHorizon, '/nmpc/prediction_horizon', 10)
         self.status_pub = self.create_publisher(SolverStatus, '/nmpc/solver_status', 10)
+        self.effort_pub = self.create_publisher(ControllerEffortSample, '/nmpc/controller_effort_raw', _EFFORT_QOS)
+
+        # Controller-effort raw samples never get built/published from _handle_solve
+        # itself (the real-time solve thread) -- they're handed off via this
+        # non-blocking queue to a dedicated background thread instead (see
+        # _effort_publish_worker), so message construction/serialization and the
+        # publish() call both happen off the solve path. put_nowait() drops (and
+        # counts) on backpressure rather than ever blocking the solve thread.
+        self._effort_queue = queue.Queue(maxsize=_EFFORT_QUEUE_MAXSIZE)
+        self._effort_drop_count = 0
+        self._solve_step = 0
+        self._effort_stop = threading.Event()
+        self._effort_thread = threading.Thread(target=self._effort_publish_worker, daemon=True)
+        self._effort_thread.start()
 
         self.create_subscription(ActiveReference, '/map/active_reference', self._on_active_reference, _REFERENCE_QOS)
         self.create_subscription(ObstacleArray, '/map/obstacles', self._on_obstacles, _OBSTACLES_QOS)
 
-        # Same nested-service-call shape as mmg_node's /nmpc/solve client: the
-        # /nmpc/solve handler below blocks on /sensor/measure, so it must live
-        # in its own callback group, separate from the client's, with a
-        # MultiThreadedExecutor -- otherwise the busy-wait below would starve
-        # the executor thread the response callback needs to run on.
+        # Own callback group + MultiThreadedExecutor so /map/active_reference
+        # and /map/obstacles subscriptions can still update the cache while a
+        # solve is in flight, instead of queuing behind it.
         self._solve_cbg = MutuallyExclusiveCallbackGroup()
-        self._sensor_client_cbg = ReentrantCallbackGroup()
-
-        self.sensor_client = self.create_client(MeasureState, '/sensor/measure', callback_group=self._sensor_client_cbg)
 
         self.create_service(SolveNMPC, '/nmpc/solve', self._handle_solve, callback_group=self._solve_cbg)
 
@@ -161,29 +185,32 @@ class NmpcNode(Node):
         msg.control_horizon = np.asarray(u_opt, dtype=float).T.flatten(order='C').tolist()
         return msg
 
-    def _measure(self, true_state):
-        """Blocking call to /sensor/measure, mirroring mmg_node's busy-wait on
-        /nmpc/solve (see module docstring). Falls back to the true state --
-        logged, not silent -- if sensor_node isn't up, so running without it
-        degrades gracefully instead of hanging the whole solve."""
-        if not self.sensor_client.service_is_ready():
-            self.get_logger().warn('/sensor/measure not available, using true state', throttle_duration_sec=2.0)
-            return true_state
-
-        measure_request = MeasureState.Request()
-        measure_request.true_state = true_state
-        future = self.sensor_client.call_async(measure_request)
-        while rclpy.ok() and not future.done():
-            time.sleep(0.0005)
-        if not rclpy.ok():
-            return true_state
-        if future.exception() is not None:
-            self.get_logger().error(f'/sensor/measure call failed: {future.exception()}, using true state')
-            return true_state
-        return future.result().measured_state
+    def _effort_publish_worker(self):
+        """Runs on its own thread: drains the queue _handle_solve enqueues onto
+        and does the actual message build + publish, so neither ever happens on
+        the solve thread. get(timeout=...) instead of a sentinel keeps shutdown
+        simple -- the loop just exits within one timeout tick of _effort_stop."""
+        while not self._effort_stop.is_set():
+            try:
+                sample = self._effort_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            step, dt, u, x, xi_ref, solve_time, success, drops = sample
+            msg = ControllerEffortSample()
+            msg.header.stamp = self.get_clock().now().to_msg()
+            msg.header.frame_id = 'map'
+            msg.step = step
+            msg.dt = dt
+            msg.u = u.tolist()
+            msg.x = x.tolist()
+            msg.x_ref = xi_ref.tolist()
+            msg.solve_time = solve_time
+            msg.success = success
+            msg.upstream_drops = drops
+            self.effort_pub.publish(msg)
 
     def _handle_solve(self, request: SolveNMPC.Request, response: SolveNMPC.Response) -> SolveNMPC.Response:
-        state = self._measure(request.state)
+        state = request.state  # already the measured state -- see module docstring
         mmg_state = [state.u, state.v, state.r, state.x, state.y, state.psi]
         delta, n = float(state.delta), float(state.n)
 
@@ -197,6 +224,24 @@ class NmpcNode(Node):
             chi_p, x_d, y_d = state.psi, state.x, state.y
 
         result = self.solver.solve(mmg_state, delta, n, chi_p, x_d, y_d, obstacles=self._obstacles_cache)
+
+        # Raw controller-effort sample: cheap numpy slicing only (arrays already
+        # exist in `result`), then a non-blocking hand-off -- no metric arithmetic,
+        # no message construction, no I/O happens here (see _effort_publish_worker).
+        self._solve_step += 1
+        try:
+            self._effort_queue.put_nowait((
+                self._solve_step,
+                self.config.dt,
+                np.asarray(result['u_opt'])[:, 0],
+                np.asarray(result['xi_traj'])[:, 0],
+                np.asarray(result['xi_ref']),
+                float(result['solve_time']),
+                bool(result['success']),
+                self._effort_drop_count,
+            ))
+        except queue.Full:
+            self._effort_drop_count += 1
 
         stamp = self.get_clock().now().to_msg()
 
@@ -234,6 +279,8 @@ def main(args=None):
     try:
         executor.spin()
     finally:
+        node._effort_stop.set()
+        node._effort_thread.join(timeout=2.0)
         node.destroy_node()
         rclpy.shutdown()
 

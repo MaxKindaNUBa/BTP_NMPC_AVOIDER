@@ -19,9 +19,10 @@ from .. import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 
-from env_model.config import CurrentConfig, WaveConfig  # noqa: E402
+from env_model.config import CurrentConfig, WaveConfig, load_current_config, load_wave_config  # noqa: E402
 from env_model.current_model import CurrentModel  # noqa: E402
 from env_model.wave_model import WaveModel  # noqa: E402
+from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
 RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_env_model_results")
 
@@ -124,17 +125,23 @@ def print_summary(log_current: dict, log_wave: dict):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sim-time", type=float, default=300.0, help="duration in seconds (default: 300)")
-    parser.add_argument("--dt", type=float, default=0.1, help="step (default: 0.1, matches sim_params.yaml)")
-    parser.add_argument("--seed", type=int, default=42, help="RNG seed for both CurrentModel and WaveModel (default: 42)")
+    parser.add_argument("--dt", type=float, default=DEFAULT_CONFIG.dt,
+                         help="step (default: sim_params.yaml's nmpc_node.dt)")
+    parser.add_argument("--seed", type=int, default=None,
+                         help="override both CurrentModel and WaveModel (=seed+1) RNG seeds; "
+                              "default: use sim_params.yaml's own current_seed/wave_seed")
     parser.add_argument("--results-dir", default=RESULTS_DIR, help="where to write plots")
     args = parser.parse_args(argv)
 
     os.makedirs(args.results_dir, exist_ok=True)
 
-    current_config = CurrentConfig(
-        mean_vx=0.05, mean_vy=0.02, time_constant_s=600.0, sigma=0.01, seed=args.seed)
-    wave_config = WaveConfig(
-        hs=0.05, tp=1.2, gamma=3.3, mean_heading=0.0, num_components=30, seed=args.seed + 1)
+    # Both configs (mean/Tc/sigma/hs/tp/gamma/...) come straight out of
+    # sim_params.yaml's mmg_node section -- no separate copy of those numbers
+    # kept in this file, so this harness can never silently drift from what a
+    # live mmg_node actually runs with. Only the seeds are ever overridden
+    # here, and only if --seed was passed.
+    current_config = load_current_config(seed=args.seed)
+    wave_config = load_wave_config(seed=(args.seed + 1) if args.seed is not None else None)
 
     print(f"--- Running CurrentModel: sim_time={args.sim_time}s, dt={args.dt}s ---")
     log_current = run_current(current_config, args.dt, args.sim_time)

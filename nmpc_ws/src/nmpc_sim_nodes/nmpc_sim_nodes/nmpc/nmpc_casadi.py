@@ -19,7 +19,9 @@ from nmpc.config import (
 )
 from nmpc.params import DEFAULT_CONFIG
 from nmpc.state_augmentation import make_rk4_step
-from nmpc.path_following import build_xi_full, pad_obstacles, wrap180_casadi, compute_effective_u_ref
+from nmpc.path_following import (
+    build_xi_full, pad_obstacles, wrap180_casadi, compute_effective_u_ref, get_reference_state,
+)
 
 
 class CasadiNMPC:
@@ -220,6 +222,10 @@ class CasadiNMPC:
         xi_0 = build_xi_full(mmg_state, delta, n, chi_p, x_d, y_d)  # current state -> initial-state constraint
         obs_flat = pad_obstacles(obstacles, self.n_obs)
         u_ref_eff = compute_effective_u_ref(mmg_state[3], mmg_state[4], x_d, y_d, self.config.U_REF, self.config)
+        # numeric twin of the symbolic xi_ref built inside _build_nlp (same inputs,
+        # same formula) -- needed only for controller-effort logging (nmpc_node
+        # publishes it raw); the solve itself never uses this numpy copy.
+        xi_ref = get_reference_state(chi_p, x_d, y_d, u_ref_eff, self.config.DELTA_TRIM, self.config.N_TRIM, self.config)
         p_val = np.concatenate([xi_0, [chi_p, x_d, y_d, u_ref_eff], obs_flat])  # matches _param_layout() order
         z0 = self._initial_guess(xi_0)
 
@@ -249,6 +255,7 @@ class CasadiNMPC:
         return {
             "u_opt": U_opt,
             "xi_traj": X_opt,
+            "xi_ref": xi_ref,
             "delta": float(delta_new),
             "n": float(n_new),
             "solve_time": solve_time,

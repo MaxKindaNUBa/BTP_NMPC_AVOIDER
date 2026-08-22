@@ -38,12 +38,12 @@ model chain (`casadi_mmg_solver/`'s `MMG_Time_Derivative_casadi` as called by
 `nmpc/state_augmentation.py`) — table lookups don't belong in an NLP's inner
 loop, and the disturbance-free dynamics are what the NMPC prediction model
 needs. It's now reintroduced as exactly the "external unmodeled disturbance
-term" case this note used to describe as hypothetical: `env_node` computes
-the wave force *outside* the symbolic CasADi graph (using this data) and
-`mmg_node`'s plant integrator adds the resulting numeric force straight into
-the dynamics' RHS for that tick, via `casadi_mmg.py`'s optional `wave_force`
-argument. The NMPC's own internal model never calls `WaveModel` and never
-sees this data.
+term" case this note used to describe as hypothetical: `mmg_node` samples
+`WaveModel` in-process (no separate node/service — see the root README's
+architecture note) and adds the resulting numeric force straight into the
+dynamics' RHS for that tick, via `casadi_mmg.py`'s optional `wave_force`
+argument (passed through `make_casadi_integrator(..., with_env=True)`). The
+NMPC's own internal model never calls `WaveModel` and never sees this data.
 
 ## Regenerating / replacing
 

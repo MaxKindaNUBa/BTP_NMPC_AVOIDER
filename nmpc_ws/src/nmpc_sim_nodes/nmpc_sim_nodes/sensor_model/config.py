@@ -6,8 +6,11 @@ this ("can be set to an effectively-zero step size if quantization is not of
 interest yet").
 """
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
+
+import _pkg_paths
 
 _DEG = np.deg2rad(1.0)
 
@@ -66,3 +69,16 @@ LIGHT = SensorNoiseConfig(
 )
 
 PRESETS = {"light": LIGHT}
+
+
+def load_preset_and_seed(seed: Optional[int] = None, path: Optional[str] = None) -> tuple:
+    """Reads sim_params.yaml's mmg_node.sensor_preset/sensor_seed fields,
+    returning (preset_name, SensorNoiseConfig, seed). `seed` overrides the
+    yaml's own sensor_seed (mainly so a script's --seed flag can pick a
+    different reproducible noise realization per run); leave unset to use
+    the yaml's value. The one entry point standalone test_*.py harnesses
+    should use instead of hardcoding a preset name/seed of their own."""
+    p = _pkg_paths.load_sim_params(path)["mmg_node"]["ros__parameters"]
+    preset_name = str(p["sensor_preset"])
+    resolved_seed = int(seed) if seed is not None else int(p["sensor_seed"])
+    return preset_name, PRESETS[preset_name], resolved_seed
