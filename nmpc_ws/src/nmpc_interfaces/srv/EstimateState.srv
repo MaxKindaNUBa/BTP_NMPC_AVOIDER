@@ -1,0 +1,6 @@
+SensorMeasurement measurement
+---
+VesselState estimated_state
+CurrentState estimated_current
+bool success
+string return_status

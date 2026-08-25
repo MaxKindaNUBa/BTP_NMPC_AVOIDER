@@ -88,17 +88,32 @@ class ExperimentLogger:
         "true_delta_rad",
         "true_delta_deg",
         "true_n_rps",
-        # Measured State (Sensor model output)
-        "meas_u_m_s",
-        "meas_v_m_s",
-        "meas_r_rad_s",
-        "meas_x_m",
-        "meas_y_m",
-        "meas_psi_rad",
-        "meas_psi_deg",
-        "meas_delta_rad",
-        "meas_delta_deg",
-        "meas_n_rps",
+        # Sensor Measurement (GPS/compass/gyro/IMU-accel/actuator-encoders --
+        # no u,v; see SensorMeasurement.msg / sensor_model.py)
+        "sensor_x_m",
+        "sensor_y_m",
+        "sensor_psi_rad",
+        "sensor_psi_deg",
+        "sensor_r_rad_s",
+        "sensor_ax_m_s2",
+        "sensor_ay_m_s2",
+        "sensor_delta_rad",
+        "sensor_delta_deg",
+        "sensor_n_rps",
+        # UKF Estimate (state + current, from ukf_node -- populated whenever
+        # ukf_node is up, independent of mmg_node's own use_ukf toggle)
+        "ukf_u_m_s",
+        "ukf_v_m_s",
+        "ukf_r_rad_s",
+        "ukf_x_m",
+        "ukf_y_m",
+        "ukf_psi_rad",
+        "ukf_psi_deg",
+        "ukf_vcx_m_s",
+        "ukf_vcy_m_s",
+        "ukf_current_speed_m_s",
+        "ukf_current_heading_rad",
+        "ukf_current_heading_deg",
         # Actuator Command (NMPC output)
         "cmd_delta_rad",
         "cmd_delta_deg",
@@ -198,7 +213,8 @@ class ExperimentLogger:
         self,
         time_s: float,
         true_state: Tuple[float, float, float, float, float, float, float, float],
-        meas_state: Optional[Tuple[float, float, float, float, float, float, float, float]] = None,
+        sensor_state: Optional[Tuple[float, float, float, float, float, float, float, float]] = None,
+        ukf_state: Optional[Tuple[float, float, float, float, float, float, float, float, float, float]] = None,
         cmd: Optional[Tuple[float, float]] = None,
         active_ref: Optional[Tuple[int, float, float, float]] = None,
         current: Optional[Tuple[bool, float, float, float, float]] = None,
@@ -209,7 +225,12 @@ class ExperimentLogger:
         """Record a single step of simulation telemetry and prediction data.
 
         true_state: (u, v, r, x, y, psi, delta, n)
-        meas_state: (u, v, r, x, y, psi, delta, n) or None (falls back to true_state)
+        sensor_state: (x, y, psi, r, ax, ay, delta, n) or None (falls back to
+            true_state's x,y,psi,r,delta,n with ax,ay zeroed -- no u,v here,
+            see SensorMeasurement.msg)
+        ukf_state: (u, v, r, x, y, psi, vcx, vcy, current_speed,
+            current_heading) or None (falls back to all-zero -- ukf_node not
+            yet publishing, e.g. startup race)
         cmd: (delta_cmd, n_cmd) or None
         active_ref: (target_idx, x_d, y_d, chi_p) or None
         current: (enabled, vx, vy, speed, heading) or None
@@ -224,12 +245,19 @@ class ExperimentLogger:
         psi_t_deg = math.degrees(psi_t)
         delta_t_deg = math.degrees(delta_t)
 
-        if meas_state is not None:
-            u_m, v_m, r_m, x_m, y_m, psi_m, delta_m, n_m = meas_state
+        if sensor_state is not None:
+            x_s, y_s, psi_s, r_s, ax_s, ay_s, delta_s, n_s = sensor_state
         else:
-            u_m, v_m, r_m, x_m, y_m, psi_m, delta_m, n_m = true_state
-        psi_m_deg = math.degrees(psi_m)
-        delta_m_deg = math.degrees(delta_m)
+            x_s, y_s, psi_s, r_s, ax_s, ay_s, delta_s, n_s = x_t, y_t, psi_t, r_t, 0.0, 0.0, delta_t, n_t
+        psi_s_deg = math.degrees(psi_s)
+        delta_s_deg = math.degrees(delta_s)
+
+        if ukf_state is not None:
+            u_u, v_u, r_u, x_u, y_u, psi_u, vcx_u, vcy_u, cspd_u, chdg_u = ukf_state
+        else:
+            u_u, v_u, r_u, x_u, y_u, psi_u, vcx_u, vcy_u, cspd_u, chdg_u = (0.0,) * 10
+        psi_u_deg = math.degrees(psi_u)
+        chdg_u_deg = math.degrees(chdg_u)
 
         if cmd is not None:
             cmd_delta, cmd_n = cmd
@@ -264,8 +292,11 @@ class ExperimentLogger:
             f"{time_s:.4f}",
             f"{u_t:.6f}", f"{v_t:.6f}", f"{r_t:.6f}", f"{x_t:.6f}", f"{y_t:.6f}",
             f"{psi_t:.6f}", f"{psi_t_deg:.4f}", f"{delta_t:.6f}", f"{delta_t_deg:.4f}", f"{n_t:.6f}",
-            f"{u_m:.6f}", f"{v_m:.6f}", f"{r_m:.6f}", f"{x_m:.6f}", f"{y_m:.6f}",
-            f"{psi_m:.6f}", f"{psi_m_deg:.4f}", f"{delta_m:.6f}", f"{delta_m_deg:.4f}", f"{n_m:.6f}",
+            f"{x_s:.6f}", f"{y_s:.6f}", f"{psi_s:.6f}", f"{psi_s_deg:.4f}", f"{r_s:.6f}",
+            f"{ax_s:.6f}", f"{ay_s:.6f}", f"{delta_s:.6f}", f"{delta_s_deg:.4f}", f"{n_s:.6f}",
+            f"{u_u:.6f}", f"{v_u:.6f}", f"{r_u:.6f}", f"{x_u:.6f}", f"{y_u:.6f}",
+            f"{psi_u:.6f}", f"{psi_u_deg:.4f}", f"{vcx_u:.6f}", f"{vcy_u:.6f}",
+            f"{cspd_u:.6f}", f"{chdg_u:.6f}", f"{chdg_u_deg:.4f}",
             f"{cmd_delta:.6f}", f"{cmd_delta_deg:.4f}", f"{cmd_n:.6f}",
             tgt_idx, f"{x_d:.6f}", f"{y_d:.6f}", f"{chi_p:.6f}", f"{chi_p_deg:.4f}",
             int(c_en), f"{c_vx:.6f}", f"{c_vy:.6f}", f"{c_spd:.6f}", f"{c_hdg:.6f}", f"{c_hdg_deg:.4f}",

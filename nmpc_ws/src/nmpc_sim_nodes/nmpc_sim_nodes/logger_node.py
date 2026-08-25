@@ -25,7 +25,7 @@ from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
 from nmpc_interfaces.msg import (  # noqa: E402
     ActiveReference, ControlCommand, ControllerEffortSample, CurrentState, ObstacleArray,
-    PredictionHorizon, SimStatus, SolverStatus, VesselState, WaveState,
+    PredictionHorizon, SensorMeasurement, SimStatus, SolverStatus, VesselState, WaveState,
 )
 
 _LATCHED_QOS = QoSProfile(
@@ -119,7 +119,9 @@ class LoggerNode(Node):
         self.effort_logger.start()
 
         # State Caches
-        self._latest_measured_state: Optional[VesselState] = None
+        self._latest_measured_state: Optional[SensorMeasurement] = None
+        self._latest_ukf_state: Optional[VesselState] = None
+        self._latest_ukf_current: Optional[CurrentState] = None
         self._latest_control_cmd: Optional[ControlCommand] = None
         self._latest_prediction_horizon: Optional[tuple] = None
         self._latest_solver_status: Optional[SolverStatus] = None
@@ -131,7 +133,9 @@ class LoggerNode(Node):
 
         # Subscriptions
         self.create_subscription(VesselState, '/mmg/state', self._on_mmg_state, 10)
-        self.create_subscription(VesselState, '/sensor/measured_state', self._on_measured_state, 10)
+        self.create_subscription(SensorMeasurement, '/sensor/measured_state', self._on_measured_state, 10)
+        self.create_subscription(VesselState, '/ukf/estimated_state', self._on_ukf_state, 10)
+        self.create_subscription(CurrentState, '/ukf/estimated_current', self._on_ukf_current, 10)
         self.create_subscription(ControlCommand, '/nmpc/control_command', self._on_control_command, 10)
         self.create_subscription(PredictionHorizon, '/nmpc/prediction_horizon', self._on_prediction_horizon, 10)
         self.create_subscription(SolverStatus, '/nmpc/solver_status', self._on_solver_status, 10)
@@ -152,8 +156,14 @@ class LoggerNode(Node):
             return 0.0
         return (self.get_clock().now() - self._start_stamp).nanoseconds * 1e-9
 
-    def _on_measured_state(self, msg: VesselState):
+    def _on_measured_state(self, msg: SensorMeasurement):
         self._latest_measured_state = msg
+
+    def _on_ukf_state(self, msg: VesselState):
+        self._latest_ukf_state = msg
+
+    def _on_ukf_current(self, msg: CurrentState):
+        self._latest_ukf_current = msg
 
     def _on_control_command(self, msg: ControlCommand):
         self._latest_control_cmd = msg
@@ -214,10 +224,16 @@ class LoggerNode(Node):
         t_sim = self._elapsed_time()
         true_state = (msg.u, msg.v, msg.r, msg.x, msg.y, msg.psi, msg.delta, msg.n)
 
-        meas_state = None
+        sensor_state = None
         if self._latest_measured_state is not None:
             m = self._latest_measured_state
-            meas_state = (m.u, m.v, m.r, m.x, m.y, m.psi, m.delta, m.n)
+            sensor_state = (m.x, m.y, m.psi, m.r, m.ax, m.ay, m.delta, m.n)
+
+        ukf_state = None
+        if self._latest_ukf_state is not None and self._latest_ukf_current is not None:
+            u = self._latest_ukf_state
+            c = self._latest_ukf_current
+            ukf_state = (u.u, u.v, u.r, u.x, u.y, u.psi, c.vx, c.vy, c.speed, c.heading)
 
         cmd = None
         if self._latest_control_cmd is not None:
@@ -248,7 +264,8 @@ class LoggerNode(Node):
         self.logger.log_step(
             time_s=t_sim,
             true_state=true_state,
-            meas_state=meas_state,
+            sensor_state=sensor_state,
+            ukf_state=ukf_state,
             cmd=cmd,
             active_ref=active_ref,
             current=current,

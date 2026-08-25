@@ -21,9 +21,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/CurrentState.msg"
   "msg/WaveState.msg"
   "msg/ControllerEffortSample.msg"
+  "msg/SensorMeasurement.msg"
   "srv/SolveNMPC.srv"
   "srv/GetScenario.srv"
   "srv/ResetSim.srv"
+  "srv/EstimateState.srv"
   DEPENDENCIES std_msgs
 )
 

@@ -1,12 +1,16 @@
 """Standalone comparison harness for sensor_model (SENSOR_NOISE_MODEL.md).
 
 Drives the real MMG plant integrator (casadi_mmg_solver, the same one
-mmg_node uses) through a fixed maneuver to get a "true" trajectory, then
-passes every sample through SensorModel.measure() to get the "measured"
-(noisy) trajectory -- exactly what sensor_node would produce with
-enabled=True. "Without noise" is just the true trajectory itself, since
-that's bit-identical to what sensor_node returns with enabled=False
-(sensor_node.py's pass-through path).
+mmg_node uses) through a fixed maneuver to get a "true" trajectory (position,
+heading, rate, and body-frame acceleration via make_casadi_accel_function),
+then passes every sample through SensorModel.measure() to get the "measured"
+(noisy) trajectory -- exactly what mmg_node's sensor path produces with
+sensor_enabled=True. No u,v comparison here -- the sensor model no longer
+measures surge/sway velocity directly (an accelerometer, not a velocity
+sensor); reconstructing u,v from this noisy stream is ukf_node's job, tested
+separately in test_ukf.py. "Without noise" is just the true trajectory
+itself, since that's bit-identical to what mmg_node's sensor path returns
+with sensor_enabled=False (its pass-through path).
 
 No rclpy, no other node needs to be running -- this only imports the plant
 integrator and the sensor_model package directly.
@@ -28,12 +32,12 @@ from .. import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 
-from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
+from casadi_mmg_solver.casadi_mmg import make_casadi_accel_function, make_casadi_integrator  # noqa: E402
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 from sensor_model.config import load_preset_and_seed  # noqa: E402
 from sensor_model.sensor_model import SensorModel  # noqa: E402
 
-RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_sensor_model_results")
+RESULTS_DIR = os.path.join(_pkg_paths.repo_root(), "nmpc_sim_logs", "test_sensor_model_results")
 
 # (key, axis label, is_angle) -- angle signals are stored/plotted in degrees
 # and get wrap-aware error computation.
@@ -42,8 +46,8 @@ _SIGNALS = [
     ("y", "Y pos (m)", False),
     ("psi", "Heading (deg)", True),
     ("r", "Yaw rate (deg/s)", True),
-    ("u", "Surge u (m/s)", False),
-    ("v", "Sway v (m/s)", False),
+    ("ax", "IMU accel ax (m/s^2)", False),
+    ("ay", "IMU accel ay (m/s^2)", False),
     ("delta", "Rudder delta (deg)", True),
     ("n", "Propeller n (rps)", False),
 ]
@@ -70,21 +74,30 @@ def _control_schedule(t: float, n_trim: float = 15.0):
 def run_true_trajectory(dt: float, sim_time: float) -> dict:
     """Integrates the real MMG plant (RK4, same integrator mmg_node uses)
     through _control_schedule. Returns a dict of numpy arrays, one per
-    signal, keyed like _SIGNALS plus 't'."""
+    signal, keyed like _SIGNALS plus 't' and 'mmg_state' (the full [u,v,r,x,y,psi]
+    trajectory, kept separately since u,v aren't sensor-measured signals but
+    run_noisy() still needs them to synthesize the true acceleration)."""
     plant_step = make_casadi_integrator(dt, method="rk4", sym_type=ca.SX)
+    accel_fn = make_casadi_accel_function(sym_type=ca.SX)
+    no_current, no_wave = ca.DM([0.0, 0.0]), ca.DM([0.0, 0.0, 0.0])
     mmg_state = np.array([0.78, 0.0, 0.0, 0.0, 0.0, 0.0])  # u, v, r, x, y, psi
 
     n_steps = int(sim_time / dt)
     log = {k: np.zeros(n_steps) for k, _, _ in _SIGNALS}
     log["t"] = np.zeros(n_steps)
+    log["mmg_state"] = np.zeros((n_steps, 6))
 
     for step in range(n_steps):
         t = step * dt
         delta, n = _control_schedule(t)
 
+        accel = np.array(accel_fn(ca.DM(mmg_state), ca.DM([delta, n]), no_current, no_wave)).flatten()
+
         log["t"][step] = t
-        log["u"][step], log["v"][step], log["r"][step] = mmg_state[0], mmg_state[1], mmg_state[2]
+        log["mmg_state"][step] = mmg_state
+        log["r"][step] = mmg_state[2]
         log["x"][step], log["y"][step], log["psi"][step] = mmg_state[3], mmg_state[4], mmg_state[5]
+        log["ax"][step], log["ay"][step] = accel[0], accel[1]
         log["delta"][step], log["n"][step] = delta, n
 
         next_state, _ = plant_step(ca.DM(mmg_state), ca.DM([delta, n]))
@@ -95,18 +108,20 @@ def run_true_trajectory(dt: float, sim_time: float) -> dict:
 
 def run_noisy(log_true: dict, preset, seed: int, dt: float) -> dict:
     """Feeds every true sample through SensorModel.measure() -- the exact
-    same call sensor_node makes per /sensor/measure request when enabled.
-    `preset` is a SensorNoiseConfig, e.g. from sensor_model.config.load_preset_and_seed()."""
+    same call mmg_node makes per tick when sensor_enabled. `preset` is a
+    SensorNoiseConfig, e.g. from sensor_model.config.load_preset_and_seed()."""
     model = SensorModel(preset, dt, seed)
     n_steps = len(log_true["t"])
     log = {k: np.zeros(n_steps) for k, _, _ in _SIGNALS}
 
     for i in range(n_steps):
-        mmg_state = [log_true["u"][i], log_true["v"][i], log_true["r"][i],
-                     log_true["x"][i], log_true["y"][i], log_true["psi"][i]]
-        meas_state, delta_meas, n_meas = model.measure(mmg_state, log_true["delta"][i], log_true["n"][i])
-        log["u"][i], log["v"][i], log["r"][i], log["x"][i], log["y"][i], log["psi"][i] = meas_state
-        log["delta"][i], log["n"][i] = delta_meas, n_meas
+        mmg_state = log_true["mmg_state"][i]
+        accel_true = (log_true["ax"][i], log_true["ay"][i])
+        r_m, x_m, y_m, psi_m, ax_m, ay_m, delta_m, n_m = model.measure(
+            mmg_state, log_true["delta"][i], log_true["n"][i], accel_true=accel_true)
+        log["x"][i], log["y"][i], log["psi"][i], log["r"][i] = x_m, y_m, psi_m, r_m
+        log["ax"][i], log["ay"][i] = ax_m, ay_m
+        log["delta"][i], log["n"][i] = delta_m, n_m
 
     log["t"] = log_true["t"]
     return log

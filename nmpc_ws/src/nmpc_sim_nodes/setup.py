@@ -29,6 +29,7 @@ setup(
             'map_node = nmpc_sim_nodes.map_node:main',
             'nmpc_node = nmpc_sim_nodes.nmpc_node:main',
             'mmg_node = nmpc_sim_nodes.mmg_node:main',
+            'ukf_node = nmpc_sim_nodes.ukf_node:main',
             'viz_node = nmpc_sim_nodes.viz_node:main',
             'rviz_node = nmpc_sim_nodes.rviz_node:main',
             'hud_node = nmpc_sim_nodes.hud_node:main',
@@ -39,6 +40,8 @@ setup(
             'test_closed_loop_noise = nmpc_sim_nodes.test_closed_loop_noise:main',
             'test_env_model = nmpc_sim_nodes.env_model.test_env_model:main',
             'test_closed_loop_env = nmpc_sim_nodes.test_closed_loop_env:main',
+            'test_ukf = nmpc_sim_nodes.test_ukf:main',
+            'tune_ukf = nmpc_sim_nodes.tune_ukf:main',
         ],
     },
 )

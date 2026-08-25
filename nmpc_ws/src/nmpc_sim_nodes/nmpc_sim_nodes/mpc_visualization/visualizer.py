@@ -109,6 +109,11 @@ class MPCVisualizer:
         self.ax_wave = self.ax_map.inset_axes([0.80, 0.58, 0.17, 0.17])
         self.current_arrow, self.current_label = self._init_compass(self.ax_current, 'CURRENT', '#1f9fd6')
         self.wave_arrow, self.wave_label = self._init_compass(self.ax_wave, 'WAVE', '#e6659a')
+        # 2nd arrow on the SAME current ring (no new inset/title/label -- just
+        # another needle) for the UKF-predicted current, matching rviz_node.py's/
+        # hud_visualizer.py's "| predicted" convention (appended to current_label
+        # in _update_compass instead of a separate text object).
+        self.ukf_current_arrow = self._add_arrow(self.ax_current, '#b34dff')
 
         # Horizon Plot Elements
         self.line_rudder, = self.ax_ctrl.plot([], [], 'g-s', markersize=4, label='Rudder δ (deg)')
@@ -158,16 +163,41 @@ class MPCVisualizer:
         label = ax.text(0, -1.3, '', fontsize=7, ha='center', va='top')
         return arrow, label
 
-    def _update_compass(self, arrow, label, screen_dx, screen_dy, magnitude, unit):
+    def _add_arrow(self, ax, color):
+        """A second needle on an ALREADY-initialized compass ring (_init_compass
+        was already called for this ax) -- no new ring/title/label, just another
+        arrow annotation, for overlaying a UKF-predicted reading on the same
+        compass instead of adding a whole new inset."""
+        arrow = ax.annotate('', xy=(0, 0), xytext=(0, 0),
+                             arrowprops=dict(arrowstyle='-|>', color=color, linewidth=2.0))
+        arrow.set_visible(False)
+        return arrow
+
+    def _update_compass(self, arrow, label, screen_dx, screen_dy, magnitude, unit,
+                         ukf_arrow=None, ukf_screen_dx=None, ukf_screen_dy=None, ukf_magnitude=None):
         """Points the arrow toward (screen_dx, screen_dy) at fixed ring radius (direction
         only -- magnitude is not arrow length, since current/wave magnitudes are tiny and
-        unbounded) and prints the magnitude below."""
+        unbounded) and prints the magnitude below. ukf_arrow/ukf_* (optional): a 2nd
+        needle plus "| <predicted>" appended straight after the actual magnitude in the
+        SAME label, from /ukf/estimated_current -- no new panel/label object, matching
+        rviz_node.py's/hud_visualizer.py's convention."""
         if magnitude > 1e-6:
             arrow.xy = (0.85 * screen_dx / magnitude, 0.85 * screen_dy / magnitude)
             arrow.set_visible(True)
         else:
             arrow.set_visible(False)
-        label.set_text(f'{magnitude:.2f} {unit}')
+
+        if ukf_arrow is not None and ukf_magnitude is not None:
+            if ukf_magnitude > 1e-6:
+                ukf_arrow.xy = (0.85 * ukf_screen_dx / ukf_magnitude, 0.85 * ukf_screen_dy / ukf_magnitude)
+                ukf_arrow.set_visible(True)
+            else:
+                ukf_arrow.set_visible(False)
+            label.set_text(f'{magnitude:.2f} | {ukf_magnitude:.2f} {unit}')
+        else:
+            if ukf_arrow is not None:
+                ukf_arrow.set_visible(False)
+            label.set_text(f'{magnitude:.2f} {unit}')
 
     def draw_ship_polygon(self, x, y, psi):
         """
@@ -194,13 +224,13 @@ class MPCVisualizer:
         self.active_wp_marker.set_data([], [])
         return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
                 self.line_rudder, self.line_rps, self.active_wp_marker,
-                self.current_arrow, self.current_label, self.wave_arrow, self.wave_label)
+                self.current_arrow, self.current_label, self.ukf_current_arrow, self.wave_arrow, self.wave_label)
 
     def update_plot(self, frame):
         if not self.is_running:
             return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
                     self.line_rudder, self.line_rps, self.active_wp_marker,
-                    self.current_arrow, self.current_label, self.wave_arrow, self.wave_label)
+                    self.current_arrow, self.current_label, self.ukf_current_arrow, self.wave_arrow, self.wave_label)
 
         snap = self.bridge.snapshot()
         u, v, r, x, y, psi = snap.ship_state
@@ -208,8 +238,14 @@ class MPCVisualizer:
         # Current/wave compass HUD: direction only (arrow), magnitude as text.
         # Screen (East, North) == data (y, x), same convention as the ship/trail plot.
         cur = snap.current
-        self._update_compass(self.current_arrow, self.current_label,
-                              cur.vy, cur.vx, cur.speed if cur.enabled else 0.0, 'm/s')
+        ukf_cur = snap.ukf_current
+        self._update_compass(
+            self.current_arrow, self.current_label,
+            cur.vy, cur.vx, cur.speed if cur.enabled else 0.0, 'm/s',
+            ukf_arrow=self.ukf_current_arrow,
+            ukf_screen_dx=ukf_cur.vy if ukf_cur is not None else None,
+            ukf_screen_dy=ukf_cur.vx if ukf_cur is not None else None,
+            ukf_magnitude=ukf_cur.speed if ukf_cur is not None else None)
         wav = snap.wave
         wave_mag = float(np.hypot(wav.fx, wav.fy)) if wav.enabled else 0.0
         self._update_compass(self.wave_arrow, self.wave_label, wav.fy, wav.fx, wave_mag, 'N')
@@ -333,9 +369,23 @@ class MPCVisualizer:
                 except Exception as e:
                     print(f"[MPCVisualizer] Error writing to CSV: {e}")
 
+        # "| <predicted>" appended straight after X/Y's actual value, from
+        # /ukf/estimated_state -- same lines, no new rows, matching the compass
+        # HUD's/rviz_node.py's actual-vs-UKF convention. Omitted (falls back to
+        # actual-only) until the first UKF message arrives.
+        ukf_pos = snap.ukf_position
+        if ukf_pos is not None:
+            x_line = f"X         : {x:6.2f} | {ukf_pos[0]:6.2f} m\n"
+            y_line = f"Y         : {y:6.2f} | {ukf_pos[1]:6.2f} m\n"
+        else:
+            x_line = f"X         : {x:6.2f} m\n"
+            y_line = f"Y         : {y:6.2f} m\n"
+
         # Update telemetry overlay
         text = (
             f"=== SHIP STATUS ===\n"
+            f"{x_line}"
+            f"{y_line}"
             f"u (Surge) : {u:6.3f} m/s\n"
             f"v (Sway)  : {v:6.3f} m/s\n"
             f"r (Yaw Rt): {r:6.3f} rad/s\n"
@@ -372,7 +422,7 @@ class MPCVisualizer:
 
         return (self.pred_line, self.ref_line, self.trail_line, self.info_text,
                 self.line_rudder, self.line_rps, self.active_wp_marker,
-                self.current_arrow, self.current_label, self.wave_arrow, self.wave_label)
+                self.current_arrow, self.current_label, self.ukf_current_arrow, self.wave_arrow, self.wave_label)
 
     def start(self):
         self.anim = FuncAnimation(self.fig, self.update_plot, init_func=self.init_plot,

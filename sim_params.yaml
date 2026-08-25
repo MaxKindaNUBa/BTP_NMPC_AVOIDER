@@ -39,12 +39,13 @@ mmg_node:
     # ukf_node always runs and is always logged/published regardless of this
     # flag, so its estimate stays available for observability either way).
     use_ukf: true
+
     # Current/wave disturbance (formerly env_node): WAVE_CURRENT_DISTURBANCE_PLAN.md,
     # sampled in-process on every tick and fed into the plant integrator only --
     # the NMPC's own prediction model never sees it. Independent toggles.
     current_enabled: true        # independent toggle
-    current_mean_speed: 0.2       # [m/s]
-    current_mean_heading: 0.77     # [rad], earth-fixed, same convention as psi
+    current_mean_speed: 0.1       # [m/s]
+    current_mean_heading: 0.1     # [rad], earth-fixed, same convention as psi
     # [s] Gauss-Markov Tc -- larger == slower wandering. 800s was arbitrary;
     # this vessel is a nearshore ASV (~1-2km from shoreline), where real current
     # variability is wind-driven (few-hour, superinertial response; storm-surge
@@ -55,8 +56,8 @@ mmg_node:
     # Gauss-Markov bias tau (300s), so a UKF/observer can't easily alias one
     # into the other -- unlike the old 800s value, which was close enough to
     # that 300s bias tau to make the two statistically hard to separate. 21600, 0.000019
-    current_time_constant: 21600.0
-    current_sigma: 0.000019          # [m/s per sqrt(s)] driving noise intensity
+    current_time_constant: 21.0
+    current_sigma: 0.0019          # [m/s per sqrt(s)] driving noise intensity
     current_seed: 234
 
     wave_enabled: true           # independent toggle
@@ -95,68 +96,6 @@ ukf_node:
     adapt_r: false
     adapt_q: false
     forgetting_factor: 0.98   # effective memory ~= 1/(1-this) samples (~50 samples = ~5s at dt=0.1s)
-
-    # Multipliers on q_diag[8:12]'s LIVE physical value (see ukf/config.py's
-    # bias_noise_diag()/load_ukf_config()) -- 1.0 = trust the physical model
-    # as-is.
-    #
-    # accel_bias_q_scale RECHECKED 2026-08-25 (project owner noticed
-    # state_ax_bias.png/state_ay_bias.png visually look "under-determined" --
-    # true bias wanders over its full physical range while the UKF estimate
-    # stays a near-flat, damped line -- same visual signature pos_bias had
-    # before ITS fix below). Swept empirically in test_ukf.py
-    # (1.194/5/15/30/60/120), and the outcome is DIFFERENT from pos_bias, not
-    # a repeat of the same bug: ax_bias RMSE improves a little out to
-    # scale~15-30 (0.00014->0.00011) but ay_bias gets steadily WORSE past
-    # scale~5 (0.00012->0.00054 at 120), and vcx/vcy RMSE degrades right
-    # alongside it (vcy goes from 4.4% better than the null baseline down to
-    # 0.5% WORSE at scale=120). Interpretation: unlike pos_bias (GPS position
-    # is a strong, low-noise measurement with real headroom to trust the bias
-    # state more), accel bias has much less SNR to work with -- pushing its Q
-    # up mostly means chasing the accelerometer's own white noise rather than
-    # genuine bias, which is also why it starts contaminating the current
-    # estimate. The near-flat look in the plot is closer to a genuine
-    # observability/SNR limit (see ukf_core.py's own docstring on why accel
-    # bias exists as a state at all -- it's only observable through predicted
-    # vs measured accel residual, the same channel current itself competes
-    # for) than a simple "Q too small" bug. Picked scale=5.0: the best point
-    # in the sweep for BOTH ax_bias and ay_bias simultaneously, before ay's
-    # degradation kicks in -- a small, unambiguous win, not the aggressive
-    # trade pos_bias's fix was.
-    accel_bias_q_scale: 5.0
-    #
-    # OLD note (2026-08-23 tune_ukf.py run, 8 train/4 val seeds, superseded by
-    # the recheck above but kept for context): converged to accel_bias=1.194;
-    # measured then against 1.0: ax_bias/ay_bias RMSE looked essentially
-    # unchanged (0.00017->0.00016, 0.00012->0.00012) and vcx/vcy improved
-    # slightly (0.00800->0.00751, 0.01147->0.01065) -- true as far as it went,
-    # but that comparison never swept far enough to see ay_bias's later
-    # degradation, since 1.194 sits well before the scale~5 knee.
-    #
-    # pos_bias_q_scale CORRECTED 2026-08-25 (separately from the above,
-    # after switching test_ukf.py's maneuver to a turning circle and
-    # noticing visible x/y trajectory drift in the state_xy.png plot,
-    # specifically worse in the 2nd/3rd circle): the NEES-tuned 1.230 above
-    # was a real, measured UNDER-tracking bug, not just a calibration
-    # nicety -- state_pos_bias_x.png/state_pos_bias_y.png showed the UKF's
-    # estimate as a damped, lagging copy of the true GPS bias (a real
-    # Gauss-Markov process, tau=120s, that wanders 2-3m over a ~300s run),
-    # undershooting every peak. That residual (true - estimate) shows up
-    # directly as an x/y position offset, worst whenever the true bias
-    # happens to be furthest from 0 (t~150-250s in that run, i.e. circles
-    # 2-3, not circle 1). Swept pos_bias_q_scale empirically in test_ukf.py
-    # (1.23/3/6/10/20/40/80): x RMSE 0.562->0.192, y RMSE 0.822->0.420,
-    # pos_bias_x/y RMSE each nearly halved, all with a clear knee around
-    # scale~20 -- x/y and pos_bias's OWN RMSE had already captured most of
-    # the achievable gain by then, and pos_bias's own RMSE started creeping
-    # back UP again by scale=40/80 (filter overreacting to GPS white noise).
-    # vcx/vcy RMSE improved too as a side effect (less pos_bias
-    # misattribution bleeding into current), same pattern as
-    # accel_bias_q_scale above. No filter update failures at any scale
-    # tested. Picked 20.0 as the practical sweet spot, not the point of
-    # maximum single-metric improvement -- re-sweep if sensor_preset or
-    # pos_bias_tau changes materially.
-    pos_bias_q_scale: 20.0
 
     # [u,v,r,x,y,psi,vcx,vcy,ax_bias,ay_bias,pos_bias_x,pos_bias_y]
     # process-noise diag. FRESH tune_ukf.py run, 2026-08-23 (NEES search, 8
@@ -198,34 +137,6 @@ ukf_node:
     # happened to draw wilder bias trajectories than 233/10 regardless of
     # tuning. Re-run tune_ukf.py after any material sensor_model/env_model
     # config change, or this goes stale the same way past runs did.
-    # SUPERSEDED 2026-08-25 for accel_bias/pos_bias specifically: their
-    # 0.926/1.447 scales above are historical (from tuning against a q_diag
-    # literal, before the live-physical override existed) -- the ACTIVE
-    # scales are accel_bias_q_scale/pos_bias_q_scale above (1.194/1.230, a
-    # fresh 2026-08-25 tune_ukf.py run against the new physical baseline).
-    # NOTE 2026-08-25: indices 6,7 (vcx/vcy) below are LITERAL/DOCUMENTATION
-    # ONLY -- both ukf_node.py and ukf/config.py's load_ukf_config() now
-    # OVERRIDE these two slots at load time with current_noise_diag(), a live
-    # derivation from mmg_node's actual current_sigma/current_time_constant
-    # above (see ukf/config.py). This closed a real bug: changing
-    # current_sigma/current_time_constant for a test (e.g. a faster-varying
-    # current) silently left this hand-copied literal sized for the OLD
-    # current's dynamics, so the filter's Q said "current barely moves" while
-    # the true current was actually moving fast -- it got smoothed away
-    # instead of tracked. Editing the 6,7 values here now has NO EFFECT;
-    # left in place only so this array's shape/units stay self-documenting.
-    # Indices 8,9,10,11 (ax_bias/ay_bias/pos_bias_x/pos_bias_y) CORRECTED
-    # 2026-08-25: same LITERAL/DOCUMENTATION ONLY treatment as 6,7, now also
-    # overridden live with bias_noise_diag() from the active sensor preset's
-    # accel_bias_sigma/tau, pos_bias_sigma/tau, TIMES accel_bias_q_scale/
-    # pos_bias_q_scale above. Before this these were an absolute literal =
-    # a hand-derived physical baseline times tune_ukf.py's found NEES-search
-    # group_scale (see _GROUPS/_expand_q), baked together into one number;
-    # now the physical part is always live and only the scale is a settable
-    # yaml value, so a sensor_preset change can't leave the physical part
-    # stale while still letting tune_ukf.py's tuning apply. See
-    # accel_bias_q_scale/pos_bias_q_scale above for the current value and
-    # its measured effect. Editing 8-11 here now has NO EFFECT.
     q_diag: [3.4809e-05, 3.4809e-05, 6.1521e-06, 8.6665e-05, 8.6665e-05, 9.8481e-07, 3.6100e-11, 3.6100e-11, 1.1630e-11, 1.1630e-11, 2.1821e-03, 2.1821e-03]
 
     # [x,y,psi,r,ax,ay] measurement-noise diag -- also this fresh tune_ukf.py
@@ -276,16 +187,12 @@ ukf_node:
     # above that floor rather than chasing it, since it trades on trusting
     # current_mean_speed/current_mean_heading to be a genuinely reasonable
     # estimate of the true current at mission start, not a real-time one).
-    # NOTE 2026-08-25: indices 6,7 (vcx/vcy) below are likewise LITERAL/
-    # DOCUMENTATION ONLY now -- same live current_noise_diag() override as
-    # q_diag above (its p0 branch: sigma**2*Tc/2, unaffected by dt). Editing
-    # the 6,7 values here has NO EFFECT. Same for 8,9,10,11
-    # (ax_bias/ay_bias/pos_bias_x/pos_bias_y) -- bias_noise_diag()'s p0 branch
-    # is just accel_bias_sigma**2/pos_bias_sigma**2 from the active preset.
     p0_diag: [0.01, 0.01, 3.046e-4, 0.25, 0.25, 7.615e-3, 3.8988e-06, 3.8988e-06, 1.8849e-8, 1.8849e-8, 1.5, 1.5]
 
 nmpc_node:
   ros__parameters:
+    solver_backend: "acados"   # or "casadi"
+
     N: 200
     dt: 0.1   # MUST match mmg_node.dt above
     LPP: 2.902
@@ -319,6 +226,10 @@ nmpc_node:
     R_DIAG: [0.01, 0.01]
     QE_SCALE: 2.0
 
+    IPOPT_MAX_ITER: 300
+    IPOPT_TOL: 1.0e-6
+    IPOPT_PRINT_LEVEL: 0
+
     ACADOS_QP_SOLVER: "PARTIAL_CONDENSING_HPIPM"
     ACADOS_NLP_SOLVER: "SQP_RTI"
     ACADOS_INTEGRATOR: "ERK"
@@ -349,7 +260,7 @@ logger_node:
     # NOT repeated here: they're read from this same file's nmpc_node section via
     # nmpc.params.DEFAULT_CONFIG, so the cost breakdown can never drift from the
     # weights the solver is actually running with.
-    R_DELTA_DIAG: [0.0, 0.0]   # diagnostic-only rate-of-rate weight -- NOT part of the actual NMPC objective (no R_delta term exists in nmpc_acados.py's cost); zero means J_du/rdelta_term columns are always 0 unless you opt in here
+    R_DELTA_DIAG: [0.0, 0.0]   # diagnostic-only rate-of-rate weight -- NOT part of the actual NMPC objective (no R_delta term exists in nmpc_casadi.py/nmpc_acados.py's cost); zero means J_du/rdelta_term columns are always 0 unless you opt in here
     saturation_tol: 1.0e-3
     rolling_window: 50
     effort_queue_maxsize: 500

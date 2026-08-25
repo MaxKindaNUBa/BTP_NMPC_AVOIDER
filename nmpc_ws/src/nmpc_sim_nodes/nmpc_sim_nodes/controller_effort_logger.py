@@ -29,7 +29,7 @@ from typing import Dict, List, Optional, Sequence
 def _wrap_to_pi(angle: float) -> float:
     """NumPy-free numeric twin of nmpc/path_following.py's wrap180_casadi,
     applied here to the psi row of dx only (see _process_sample) -- the same
-    row nmpc_casadi.py's own stage cost wraps before squaring."""
+    row nmpc_acados.py's own NONLINEAR_LS cost wraps before squaring."""
     return math.atan2(math.sin(angle), math.cos(angle))
 
 

@@ -3,8 +3,9 @@
 The actual NMPC controller: a path-following + (eventually) obstacle-avoidance
 Nonlinear Model Predictive Controller built on top of the MMG vessel dynamics
 (`casadi_mmg_solver/`), adapted from the two papers in `research_papers/`.
-Two solver backends share one formulation — CasADi/IPOPT for
-debugging, Acados/SQP-RTI for anything close to real time.
+Solved with Acados/SQP-RTI, the only backend nmpc_node uses (a CasADi/IPOPT
+debug backend existed early on but was removed once SQP-RTI was validated —
+too slow for anything beyond one-off formulation checks).
 
 ## Package layout
 
@@ -13,8 +14,7 @@ debugging, Acados/SQP-RTI for anything close to real time.
 | `config.py` | Single source of truth for every tunable parameter (horizon, actuator bounds, cost weights, obstacle/slack settings, solver options). Nothing is hardcoded anywhere else. |
 | `path_following.py` | Pure NumPy guidance geometry: cross-track error, course angle/error, waypoint switching, the distance-scaled speed-reference ramp, obstacle padding. Also holds `wrap180_casadi`, the one CasADi-symbolic helper this file needs for the solvers' cost functions. |
 | `state_augmentation.py` | The CasADi symbolic augmented-state ODE (`augmented_dynamics_casadi`) wrapping `casadi_mmg_solver`'s MMG dynamics with the new guidance/actuator-rate rows, plus an RK4 step and a validation harness against the raw MMG model. |
-| `nmpc_casadi.py` | **Step A** — `CasadiNMPC`, a full multiple-shooting NLP solved with IPOPT. Slow, but every intermediate value is inspectable — this is where the formulation itself gets debugged. |
-| `nmpc_acados.py` | **Step B** — `AcadosNMPC`, the same formulation compiled to a real-time SQP-RTI OCP via acados. This is the one meant to actually run in a control loop. |
+| `nmpc_acados.py` | `AcadosNMPC`, the formulation compiled to a real-time SQP-RTI OCP via acados. The only solver `nmpc_node` builds. |
 | `test_nmpc.py` | Closed-loop validation harness (plant + solver, no obstacles) — 4 scenarios, results plotted to `results/`. |
 | `run_live.py` | Same rollouts as above, but streamed live into `mpc_visualization/`'s dashboard instead of saved as static plots. |
 | `compare_qu.py` | Ad-hoc diagnostic script comparing `Q[u]=0` vs the tuned weight. |
@@ -45,11 +45,10 @@ row's own residual isn't separately wrapped in the cost.
 
 ## Solver formulation
 
-Both solvers share:
 - **Cost**: quadratic tracking (`Q`) + control-rate penalty (`R`) + terminal
   cost (`Qe = QE_SCALE * Q`), summed over the horizon.
 - **Dynamics constraint**: RK4-discretized `augmented_dynamics_casadi`,
-  enforced via multiple shooting (CasADi) / the OCP's own integrator (Acados).
+  enforced via the OCP's own integrator.
 - **Obstacle avoidance**: soft, slack-relaxed quadratic distance constraints,
   one per fixed obstacle slot (`config.MAX_OBSTACLES`, unused slots padded
   with a harmless far-away dummy via `pad_obstacles`) — never hard, since a
@@ -77,9 +76,9 @@ again if the formulation is ever touched without this context:
    *raw* `psi` against `chi_p`, but raw `psi` accumulates unboundedly while
    `chi_p` stays wrapped — a long rollout with sustained turning can read an
    otherwise-correct heading as a huge cost. Fixed by wrapping the `(psi -
-   chi_p)` residual itself in both solvers' cost (`wrap180_casadi`); Acados
-   had to switch from `LINEAR_LS` to `NONLINEAR_LS` cost type to express this,
-   since a wrapped residual isn't affine in the state.
+   chi_p)` residual itself in the cost (`wrap180_casadi`); Acados had to
+   switch from `LINEAR_LS` to `NONLINEAR_LS` cost type to express this, since
+   a wrapped residual isn't affine in the state.
 4. **Sideslip-formula mismatch.** `path_following.py` used `asin(v/U)`;
    `casadi_mmg_solver`'s own internal convention is `atan2(-v, u)` — different
    sign, and `asin` can't distinguish forward from reverse motion. Unified to

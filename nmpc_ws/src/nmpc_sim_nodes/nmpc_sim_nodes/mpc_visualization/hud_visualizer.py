@@ -29,6 +29,9 @@ class HUDVisualizer:
         self.fig.canvas.manager.set_window_title('NMPC HUD: Current / Wave / Control Horizon')
 
         self.current_arrow = self._init_compass(self.ax_current, '#1f9fd6')
+        # 2nd arrow on the SAME ring for the UKF-predicted current -- no new
+        # panel, matching rviz_node.py's/visualizer.py's "| predicted" convention.
+        self.ukf_current_arrow = self._init_compass(self.ax_current, '#b34dff')
         self._init_wave_scatter(self.ax_wave)
         self._wave_trail = collections.deque(maxlen=_WAVE_TRAIL_LEN)
 
@@ -63,14 +66,32 @@ class HUDVisualizer:
         arrow.set_visible(False)
         return arrow
 
-    def _update_compass(self, ax, arrow, title_prefix, screen_dx, screen_dy, magnitude, unit):
+    def _update_compass(self, ax, arrow, title_prefix, screen_dx, screen_dy, magnitude, unit,
+                         ukf_arrow=None, ukf_screen_dx=None, ukf_screen_dy=None, ukf_magnitude=None):
         if magnitude > 1e-6:
             arrow.xy = (0.85 * screen_dx / magnitude, 0.85 * screen_dy / magnitude)
             arrow.set_visible(True)
-            ax.set_title(f'{title_prefix}: {magnitude:.2f} {unit}', fontsize=10, fontweight='bold')
         else:
             arrow.set_visible(False)
-            ax.set_title(f'{title_prefix}: off', fontsize=10, fontweight='bold')
+
+        # "| <predicted>" straight after the actual reading in the SAME title,
+        # from /ukf/estimated_current -- no new panel, matching visualizer.py's/
+        # rviz_node.py's convention. Omitted (falls back to actual-only) until
+        # the first UKF message arrives (ukf_arrow is None for the wave compass,
+        # which has no UKF equivalent).
+        if ukf_arrow is not None:
+            if ukf_magnitude is not None and ukf_magnitude > 1e-6:
+                ukf_arrow.xy = (0.85 * ukf_screen_dx / ukf_magnitude, 0.85 * ukf_screen_dy / ukf_magnitude)
+                ukf_arrow.set_visible(True)
+            else:
+                ukf_arrow.set_visible(False)
+            if ukf_magnitude is not None:
+                title = f'{title_prefix}: {magnitude:.2f} | {ukf_magnitude:.2f} {unit}'
+            else:
+                title = f'{title_prefix}: {magnitude:.2f} {unit}'
+        else:
+            title = f'{title_prefix}: {magnitude:.2f} {unit}' if magnitude > 1e-6 else f'{title_prefix}: off'
+        ax.set_title(title, fontsize=10, fontweight='bold')
 
     # ---- wave force scatter ------------------------------------------------
     def _init_wave_scatter(self, ax):
@@ -113,18 +134,24 @@ class HUDVisualizer:
     def init_plot(self):
         self.line_rudder.set_data([], [])
         self.line_rps.set_data([], [])
-        return (self.line_rudder, self.line_rps, self.current_arrow, self.wave_scatter)
+        return (self.line_rudder, self.line_rps, self.current_arrow, self.ukf_current_arrow, self.wave_scatter)
 
     def update_plot(self, frame):
         if not self.is_running:
-            return (self.line_rudder, self.line_rps, self.current_arrow, self.wave_scatter)
+            return (self.line_rudder, self.line_rps, self.current_arrow, self.ukf_current_arrow, self.wave_scatter)
 
         snap = self.bridge.snapshot()
 
         # screen (East, North) == data (y, x), same convention as visualizer.py's map
         cur = snap.current
-        self._update_compass(self.ax_current, self.current_arrow, 'CURRENT',
-                              cur.vy, cur.vx, cur.speed if cur.enabled else 0.0, 'm/s')
+        ukf_cur = snap.ukf_current
+        self._update_compass(
+            self.ax_current, self.current_arrow, 'CURRENT',
+            cur.vy, cur.vx, cur.speed if cur.enabled else 0.0, 'm/s',
+            ukf_arrow=self.ukf_current_arrow,
+            ukf_screen_dx=ukf_cur.vy if ukf_cur is not None else None,
+            ukf_screen_dy=ukf_cur.vx if ukf_cur is not None else None,
+            ukf_magnitude=ukf_cur.speed if ukf_cur is not None else None)
 
         wav = snap.wave
         fx, fy = (wav.fx, wav.fy) if wav.enabled else (0.0, 0.0)
@@ -147,7 +174,7 @@ class HUDVisualizer:
         self.ax_ctrl.legend(lines_ctrl, [line.get_label() for line in lines_ctrl],
                              loc='best', fontsize=8)
 
-        return (self.line_rudder, self.line_rps, self.current_arrow, self.wave_scatter)
+        return (self.line_rudder, self.line_rps, self.current_arrow, self.ukf_current_arrow, self.wave_scatter)
 
     def start(self):
         # blit=False: both the control-horizon panel's and the wave scatter's

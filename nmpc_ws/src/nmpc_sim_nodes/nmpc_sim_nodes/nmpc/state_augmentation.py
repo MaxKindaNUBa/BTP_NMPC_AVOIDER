@@ -12,9 +12,8 @@ new bookkeeping layered on top per the path-following augmentation.
 
 Discretization note: make_rk4_step() below performs a standard vector RK4
 of the full 11-state augmented ODE — the same scheme acados' generic ERK
-integrator applies to model.f_expl_expr. This keeps CasadiNMPC (Step A) and
-AcadosNMPC (Step B) numerically consistent with each other (required for the
-< 1cm trajectory match in Part 4, Step 7). It is NOT the same discretization
+integrator applies to model.f_expl_expr. This keeps this module's own RK4 and
+AcadosNMPC's numerically consistent with each other. It is NOT the same discretization
 casadi_mmg.py's own make_casadi_integrator() uses internally (that helper
 does a specialized "integrate in body frame, rotate once" RK4 trick for
 [x, y, psi] only) — see the note in test_augmented_vs_mmg() below.
@@ -37,8 +36,15 @@ from nmpc.config import (
 from nmpc.params import DEFAULT_CONFIG
 
 
-def augmented_dynamics_casadi(xi_sym, u_aug_sym, chi_p_sym):
-    """xi_dot = f_aug(xi, u_aug, chi_p) — Section 1.3 row by row."""
+def augmented_dynamics_casadi(xi_sym, u_aug_sym, chi_p_sym, current_sym=(0.0, 0.0)):
+    """xi_dot = f_aug(xi, u_aug, chi_p, current) — Section 1.3 row by row.
+
+    current_sym: earth-frame (vcx, vcy) [m/s], held constant over whatever
+    horizon/step this is evaluated at (frozen-disturbance approximation --
+    see CURRENT_AWARE_NMPC_PAPERS.md). Passed straight through into the MMG
+    sub-block so the NMPC's own dynamics-continuity constraint reflects the
+    same current-aware physics the plant/UKF already use.
+    """
     # unpack the 11-state vector by name for readability
     e_y = xi_sym[IDX_EY]
     s_psi = xi_sym[IDX_SPSI]
@@ -58,7 +64,7 @@ def augmented_dynamics_casadi(xi_sym, u_aug_sym, chi_p_sym):
     # hand the 6-state sub-block to the untouched MMG model for the physics
     mmg_state = ca.vertcat(u, v, r, x, y, psi)
     mmg_control = ca.vertcat(delta, n)
-    mmg_dot = MMG_Time_Derivative_casadi(mmg_state, mmg_control)
+    mmg_dot = MMG_Time_Derivative_casadi(mmg_state, mmg_control, current=current_sym)
     u_dot, v_dot, r_dot = mmg_dot[0], mmg_dot[1], mmg_dot[2]
     x_dot, y_dot, psi_dot = mmg_dot[3], mmg_dot[4], mmg_dot[5]
 
@@ -81,14 +87,18 @@ def augmented_dynamics_casadi(xi_sym, u_aug_sym, chi_p_sym):
 
 
 def make_rk4_step(dt: float, sym_type=ca.MX) -> ca.Function:
-    """Builds ca.Function('rk4_step', [xi, u_aug, chi_p], [xi_next]) via
-    standard 4th-order vector Runge-Kutta of augmented_dynamics_casadi."""
+    """Builds ca.Function('rk4_step', [xi, u_aug, chi_p, current], [xi_next])
+    via standard 4th-order vector Runge-Kutta of augmented_dynamics_casadi.
+    current is held constant across all 4 RK stages, same convention chi_p
+    already uses (and the same convention casadi_mmg.py's own integrator
+    uses for current/wave_force with with_env=True)."""
     xi = sym_type.sym("xi", STATE_DIM)
     u_aug = sym_type.sym("u_aug", CONTROL_DIM)
     chi_p = sym_type.sym("chi_p")   # path angle, held constant over one RK4 step
+    current = sym_type.sym("current", 2)   # [vcx, vcy], held constant over one RK4 step
 
     def f(xi_, u_):
-        return augmented_dynamics_casadi(xi_, u_, chi_p)
+        return augmented_dynamics_casadi(xi_, u_, chi_p, current)
 
     # standard 4-stage Runge-Kutta
     k1 = f(xi, u_aug)
@@ -97,8 +107,8 @@ def make_rk4_step(dt: float, sym_type=ca.MX) -> ca.Function:
     k4 = f(xi + dt * k3, u_aug)
     xi_next = xi + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
 
-    return ca.Function("rk4_step", [xi, u_aug, chi_p], [xi_next],
-                        ["xi", "u_aug", "chi_p"], ["xi_next"])
+    return ca.Function("rk4_step", [xi, u_aug, chi_p, current], [xi_next],
+                        ["xi", "u_aug", "chi_p", "current"], ["xi_next"])
 
 
 def test_augmented_vs_mmg(sim_time: float = 200.0, dt: float = 0.05,
@@ -159,11 +169,12 @@ def test_augmented_vs_mmg(sim_time: float = 200.0, dt: float = 0.05,
 
     u_aug_val = ca.DM([0.0, 0.0])   # no rudder/prop rate change: delta, n held constant
     chi_p_val = 0.0
+    current_val = ca.DM([0.0, 0.0])   # disturbance-free, matches f_mmg_only/f_local_frame's defaults
 
     max_diff_ab = np.zeros(MMG_STATE_DIM)
     for _ in range(N):
         s_mmg = f_mmg_only(s_mmg, control_val)
-        xi = f_aug(xi, u_aug_val, chi_p_val)
+        xi = f_aug(xi, u_aug_val, chi_p_val, current_val)
         s_local, _ = f_local_frame(s_local, control_val)
 
         xi_np = np.array(xi).flatten()

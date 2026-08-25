@@ -47,7 +47,7 @@ from env_model.config import load_current_config, load_wave_config  # noqa: E402
 from env_model.current_model import CurrentModel  # noqa: E402
 from env_model.wave_model import WaveModel  # noqa: E402
 
-RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_closed_loop_env_results")
+RESULTS_DIR = os.path.join(_pkg_paths.repo_root(), "nmpc_sim_logs", "test_closed_loop_env_results")
 
 # (label, use_current, use_wave, plot color) -- run order and plot styling.
 _SCENARIOS = [

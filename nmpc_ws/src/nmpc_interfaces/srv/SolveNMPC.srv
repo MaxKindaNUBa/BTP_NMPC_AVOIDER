@@ -1,4 +1,5 @@
 VesselState state
+CurrentState current
 ---
 ControlCommand command
 PredictionHorizon horizon

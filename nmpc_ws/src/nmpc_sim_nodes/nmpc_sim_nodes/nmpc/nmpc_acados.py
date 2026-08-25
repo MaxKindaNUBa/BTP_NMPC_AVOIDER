@@ -1,6 +1,6 @@
 """
-Step B — same NMPC problem as nmpc_casadi.py, implemented with Acados OCP for
-real-time SQP-RTI. Only meaningful once Step A (CasADi IPOPT) is validated.
+NMPC problem formulation, implemented with Acados OCP for real-time SQP-RTI --
+the only solver backend nmpc_node uses.
 """
 import os
 import sys
@@ -41,8 +41,8 @@ from nmpc.path_following import (
 
 def _param_vector(config):
     """Length of the runtime parameter vector p:
-    p = [chi_p, x_d, y_d, x_obs_1, y_obs_1, r_obs_1, ...]"""
-    return 3 + 3 * config.MAX_OBSTACLES
+    p = [chi_p, x_d, y_d, vcx, vcy, x_obs_1, y_obs_1, r_obs_1, ...]"""
+    return 5 + 3 * config.MAX_OBSTACLES
 
 
 def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
@@ -61,12 +61,13 @@ def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
     chi_p = p[0]
     x_d = p[1]
     y_d = p[2]
-    obs_p = p[3:]
+    current_p = p[3:5]  # [vcx, vcy], frozen over the horizon (frozen-disturbance approximation)
+    obs_p = p[5:]
 
     model.x = xi
     model.u = u_aug
     model.p = p
-    model.f_expl_expr = augmented_dynamics_casadi(xi, u_aug, chi_p)  # same dynamics as CasadiNMPC
+    model.f_expl_expr = augmented_dynamics_casadi(xi, u_aug, chi_p, current_p)
 
     # obstacle constraint expressions, one row per fixed obstacle slot:
     # (x_k - x_obs_i)^2 + (y_k - y_obs_i)^2 - r_c_i^2 + s_i >= 0
@@ -82,8 +83,7 @@ def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
     ocp.dims.N = N
 
     # ---- cost: NONLINEAR_LS, y = [xi with psi row wrapped; u_aug] tracked to yref ----
-    # (matches CasadiNMPC's cost exactly, including the psi wrap — see nmpc_casadi.py's
-    # _build_nlp for why: raw psi never wraps back to (-pi,pi] but chi_p does, so a
+    # (psi row is wrapped before squaring: raw psi never wraps back to (-pi,pi] but chi_p does, so a
     # long rollout can read an otherwise-fine heading as a huge error at this row's
     # dominant Q weight (main.pdf Q[psi]=30). LINEAR_LS can't express a wrapped
     # residual (not affine in xi), hence NONLINEAR_LS here instead of the plain
@@ -191,14 +191,18 @@ class AcadosNMPC:
         self._last_delta = config.DELTA_TRIM  # fallback command if a solve ever fails
         self._last_n = config.N_TRIM
 
-    def solve(self, mmg_state, delta, n, chi_p, x_d, y_d, obstacles=None):
+    def solve(self, mmg_state, delta, n, chi_p, x_d, y_d, obstacles=None, current=(0.0, 0.0)):
         cfg = self.config
         if obstacles is None:
             obstacles = []
 
         xi_0 = build_xi_full(mmg_state, delta, n, chi_p, x_d, y_d)
         obs_flat = pad_obstacles(obstacles, self.n_obs)
-        params = np.concatenate([[chi_p, x_d, y_d], obs_flat])  # matches _param_vector() order
+        # current is set once per solve() call and held fixed across all N
+        # stages below via the per-stage "p" set loop -- the frozen-disturbance
+        # approximation (we only have a single online estimate, not a
+        # horizon-length forecast).
+        params = np.concatenate([[chi_p, x_d, y_d], current, obs_flat])  # matches _param_vector() order
 
         u_ref_eff = compute_effective_u_ref(mmg_state[3], mmg_state[4], x_d, y_d, cfg.U_REF, cfg)
         xi_ref = get_reference_state(chi_p, x_d, y_d, u_ref_eff, cfg.DELTA_TRIM, cfg.N_TRIM, cfg)

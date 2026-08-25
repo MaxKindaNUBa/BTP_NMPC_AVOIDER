@@ -24,7 +24,7 @@ from nmpc.path_following import (  # noqa: E402
     compute_course_angle, compute_course_error, select_active_waypoint,
 )
 
-RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_nmpc_results")
+RESULTS_DIR = os.path.join(_pkg_paths.repo_root(), "nmpc_sim_logs", "test_nmpc_results")
 
 
 def run_scenario(nmpc_solver, waypoints, mmg_init, sim_time, config=DEFAULT_CONFIG,

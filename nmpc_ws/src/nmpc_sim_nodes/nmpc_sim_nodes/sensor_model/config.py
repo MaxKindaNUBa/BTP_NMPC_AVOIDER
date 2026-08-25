@@ -34,12 +34,16 @@ class SensorNoiseConfig:
     r_bias_tau: float            # [s]
     r_bias_sigma: float          # [rad/s]
 
-    # surge/sway velocity (u, v) -- section 3.4. "direct" mode uses these
-    # white/bias sigmas straight on u and v; "derived" mode instead
-    # differentiates the (already-noisy) position measurement per section 2.h.
-    velocity_mode: str            # "direct" | "derived"
-    uv_white_sigma: float         # [m/s], used only when velocity_mode == "direct"
-    uv_bias_sigma: float          # [m/s], used only when velocity_mode == "direct"
+    # body-frame accelerometer (ax, ay) -- IMU, replaces the old direct u,v
+    # velocity channel entirely: this sensor model no longer measures u,v at
+    # all (that reconstruction is the UKF's job now). White + Gauss-Markov
+    # bias, same two-component shape as the psi/r groups above (real MEMS
+    # accelerometers exhibit both a noise-density term and a slowly-drifting
+    # bias-instability term per their Allan-variance spec, not white noise
+    # alone).
+    accel_white_sigma: float      # [m/s^2]
+    accel_bias_tau: float         # [s]
+    accel_bias_sigma: float       # [m/s^2]
 
     # rudder angle (delta) / propeller speed (n) -- actuator encoders, 3.5
     delta_white_sigma: float      # [rad]
@@ -58,7 +62,8 @@ LIGHT = SensorNoiseConfig(
 
     r_white_sigma=0.1 * _DEG, r_bias_tau=300.0, r_bias_sigma=0.05 * _DEG,
 
-    velocity_mode="direct", uv_white_sigma=0.1, uv_bias_sigma=0.02,
+    # Starting values -- not yet empirically tuned; see test_ukf.py.
+    accel_white_sigma=0.02, accel_bias_tau=300.0, accel_bias_sigma=0.01,
 
     # 0.1 deg / 0.05 deg per section 4's delta row
     delta_white_sigma=0.1 * _DEG, delta_bias_sigma=0.05 * _DEG, delta_lsb=0.0,
@@ -68,7 +73,61 @@ LIGHT = SensorNoiseConfig(
     n_white_sigma=0.5 / 60.0, n_bias_sigma=0.2 / 60.0, n_lsb=0.0,
 )
 
-PRESETS = {"light": LIGHT}
+# SBG_ELLIPSE_N: derived from SBG Systems' real Ellipse-N datasheet (a
+# semi-expensive, marine-relevant GNSS-aided INS -- IMU + GPS + rate gyro in
+# one integrated module: https://www.sbg-systems.com/ins/ellipse-n/ and its
+# performance-specifications page), not hand-picked placeholder numbers.
+# Source figures (as published, 1-sigma/RMS over full temperature range):
+#   Gyroscope:     Angular Random Walk (ARW) = 0.18 deg/sqrt(hr)
+#                  In-run bias instability    = 7 deg/hr
+#   Accelerometer: Velocity Random Walk (VRW) = 57 ug/sqrt(Hz)
+#                  In-run bias instability    = 14 ug
+#   GNSS:          Single-point horizontal position accuracy = 1.5 m RMS
+#   Heading:       Marine, single-antenna magnetic mode       = 0.8 deg RMS
+#
+# Conversion to this project's per-sample sigma_white / sigma_bias split:
+#   Gyro/accel white noise: ARW/VRW are continuous-time noise DENSITIES
+#   (deg/s/sqrt(Hz) once ARW is divided by 60; ug/sqrt(Hz) for VRW as
+#   published). Discrete sample sigma at this project's dt=0.1s
+#   (fs=10Hz) = density * sqrt(fs) -- the standard random-walk-to-sample-noise
+#   conversion (e.g. Groves, "Principles of GNSS, Inertial, and Multisensor
+#   Integrated Navigation Systems").
+#   Gyro/accel bias: "in-run bias instability" IS the Allan-variance
+#   stationary-wander amplitude -- maps directly onto this project's
+#   Gauss-Markov bias_sigma, no conversion needed beyond units.
+#   GPS position / heading: the datasheet gives one COMBINED RMS figure, not
+#   separately split into white vs. slowly-correlated (bias) components.
+#   This project splits each combined figure using a 2/3-bias : 1/3-white
+#   VARIANCE ratio (i.e. bias_sigma = total*sqrt(2/3), white_sigma =
+#   total*sqrt(1/3)) -- a documented approximation, not a datasheet number:
+#   single-point GPS error is dominated by slowly-varying atmospheric/
+#   multipath effects (correlating over tens of seconds as geometry/
+#   atmosphere drift) rather than fast receiver thermal noise, and magnetic
+#   heading error is likewise dominated by slowly-varying calibration/local-
+#   disturbance residuals rather than fast noise -- both are the same
+#   underlying assumption applied consistently across the two channels.
+#   pos_bias_tau/psi_bias_tau/r_bias_tau/accel_bias_tau: the datasheet gives
+#   no correlation-time figures at all, so these four are carried over
+#   unchanged from LIGHT's own values (also not datasheet-derived there).
+_SBG_G0 = 9.80665  # [m/s^2] standard gravity, for converting ug -> m/s^2
+SBG_ELLIPSE_N = SensorNoiseConfig(
+    pos_white_sigma=0.8660254, pos_bias_tau=120.0, pos_bias_sigma=1.2247449,
+    pos_outlier_p=0.0, pos_outlier_sigma=0.0,  # not covered by the datasheet's aggregate accuracy figure
+
+    psi_white_sigma=0.4618802 * _DEG, psi_bias_tau=300.0, psi_bias_sigma=0.6531973 * _DEG,
+
+    r_white_sigma=0.00948683 * _DEG, r_bias_tau=300.0, r_bias_sigma=(7.0 / 3600.0) * _DEG,
+
+    accel_white_sigma=57e-6 * np.sqrt(10.0) * _SBG_G0, accel_bias_tau=300.0, accel_bias_sigma=14e-6 * _SBG_G0,
+
+    # Actuator encoders (delta, n) aren't part of an IMU/GPS/gyro nav module
+    # -- out of scope for this datasheet-derived preset, carried over from
+    # LIGHT unchanged.
+    delta_white_sigma=0.1 * _DEG, delta_bias_sigma=0.05 * _DEG, delta_lsb=0.0,
+    n_white_sigma=0.5 / 60.0, n_bias_sigma=0.2 / 60.0, n_lsb=0.0,
+)
+
+PRESETS = {"light": LIGHT, "sbg_ellipse_n": SBG_ELLIPSE_N}
 
 
 def load_preset_and_seed(seed: Optional[int] = None, path: Optional[str] = None) -> tuple:

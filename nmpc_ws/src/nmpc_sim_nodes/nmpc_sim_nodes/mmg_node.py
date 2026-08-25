@@ -1,18 +1,28 @@
 """mmg_node: owns the plant integrator and the master 1/dt clock (section 2.7 /
-2.3 of ROS2_CONVERSION_PLAN.md). Each tick: measure the true state (sensor
-noise, in-process), call /nmpc/solve with that measured state and block,
-apply the returned (delta, n), sample the current/wave disturbance
-(in-process), integrate one true-state RK4 step, publish the new true state.
+2.3 of ROS2_CONVERSION_PLAN.md). Each tick: sample the current/wave
+disturbance, synthesize the true IMU/GPS/gyro sensor measurement, call
+/ukf/estimate (always, for observability), populate /nmpc/solve's request
+from either the true state or the UKF's estimate depending on use_ukf, block
+on the response, apply the returned (delta, n), integrate one true-state RK4
+step, publish the new true state.
 
 Sensor noise (formerly sensor_node) and current/wave disturbance (formerly
 env_node) live directly in this node now -- no separate ROS2 nodes, no
 /sensor/measure or /env/disturbance RPCs. Both remain independently
 toggleable via parameters (sensor_enabled, current_enabled, wave_enabled),
 same semantics as before: disabled means pass-through/zero, not a partial
-mode. This also enforces, by construction, that nmpc_node can never see the
-true state: the only field on /nmpc/solve's request (VesselState state) is
-always populated from the measured state computed here, never from
-self.mmg_state.
+mode.
+
+use_ukf governs ONLY what /nmpc/solve's request.state is populated from:
+true state when False (bypasses sensor noise AND the UKF entirely), the
+UKF's estimate when True -- independent of sensor_enabled, which governs
+only whether /sensor/measured_state itself carries injected noise. The UKF
+service is called every tick regardless of use_ukf, so /ukf/estimated_state
+and the logged UKF columns stay populated for observability either way.
+Unlike the pre-UKF version of this node, nmpc_node's docstring claim ("no
+path to the plant's true state at all") is now only true when use_ukf=True --
+see nmpc_node.py's own docstring, which is not updated to reflect this
+(explicitly out of scope; a known, flagged piece of documentation debt).
 """
 import math
 import time
@@ -29,10 +39,10 @@ from . import _pkg_paths
 _pkg_paths.ensure_on_path()
 
 import casadi as ca  # noqa: E402
-from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
+from casadi_mmg_solver.casadi_mmg import make_casadi_accel_function, make_casadi_integrator  # noqa: E402
 
-from nmpc_interfaces.msg import CurrentState, SimStatus, VesselState, WaveState  # noqa: E402
-from nmpc_interfaces.srv import ResetSim, SolveNMPC  # noqa: E402
+from nmpc_interfaces.msg import CurrentState, SensorMeasurement, SimStatus, VesselState, WaveState  # noqa: E402
+from nmpc_interfaces.srv import EstimateState, ResetSim, SolveNMPC  # noqa: E402
 
 from env_model.config import CurrentConfig, WaveConfig  # noqa: E402
 from env_model.current_model import CurrentModel  # noqa: E402
@@ -60,7 +70,16 @@ class MmgNode(Node):
         self.declare_parameter('dt', 0.1)
         self.dt = float(self.get_parameter('dt').value)
 
+        # Selects /nmpc/solve's *state* source only (UKF estimate vs. true
+        # state). Current feedforward to the NMPC is independent of this flag
+        # and always active -- see _tick(), which sources it from the UKF's
+        # estimated_current when use_ukf is True/healthy, otherwise straight
+        # from the true environment current sampled this tick.
+        self.declare_parameter('use_ukf', False)
+        self.use_ukf = bool(self.get_parameter('use_ukf').value)
+
         self.plant_step = make_casadi_integrator(self.dt, method='rk4', sym_type=ca.SX, with_env=True)
+        self.accel_fn = make_casadi_accel_function(sym_type=ca.SX)
 
         self._init_sensor_model()
         self._init_env_models()
@@ -81,11 +100,13 @@ class MmgNode(Node):
         self._misc_cbg = ReentrantCallbackGroup()
 
         self.state_pub = self.create_publisher(VesselState, '/mmg/state', 10)
-        self.measured_pub = self.create_publisher(VesselState, '/sensor/measured_state', 10)
+        self.measured_pub = self.create_publisher(SensorMeasurement, '/sensor/measured_state', 10)
         self.current_pub = self.create_publisher(CurrentState, '/env/current_state', 10)
         self.wave_pub = self.create_publisher(WaveState, '/env/wave_state', 10)
 
         self.solve_client = self.create_client(SolveNMPC, '/nmpc/solve', callback_group=self._client_cbg)
+        self.ukf_client = self.create_client(EstimateState, '/ukf/estimate', callback_group=self._client_cbg)
+        self.ukf_reset_client = self.create_client(ResetSim, '/ukf/reset', callback_group=self._misc_cbg)
 
         # transient-local: mmg_node's tick loop is gated on seeing RUNNING at
         # least once, so a late subscription must still get map_node's last
@@ -101,7 +122,7 @@ class MmgNode(Node):
         self.timer = self.create_timer(self.dt, self._tick, callback_group=self._timer_cbg)
 
         self.get_logger().info(
-            f'mmg_node up, dt={self.dt}s, sensor_enabled={self._sensor_enabled}, '
+            f'mmg_node up, dt={self.dt}s, sensor_enabled={self._sensor_enabled}, use_ukf={self.use_ukf}, '
             f'current_enabled={self.current_model is not None}, wave_enabled={self.wave_model is not None}, '
             f'waiting for /map/initial_state...')
 
@@ -187,8 +208,24 @@ class MmgNode(Node):
             self.delta, self.n = delta, n
         else:
             self.mmg_state, self.delta, self.n = _vessel_state_to_tuple(request.new_initial_state)
+
+        self._reset_ukf()
+
         response.success = True
         return response
+
+    def _reset_ukf(self):
+        """Forwards the just-resolved (mmg_state, delta, n) to /ukf/reset so
+        the filter's covariance/estimate never carries stale state across a
+        scenario reset. Runs on _misc_cbg (this handler's own group, not the
+        tick's), so a short blocking wait here is safe."""
+        if not self.ukf_reset_client.service_is_ready():
+            self.get_logger().warn('/ukf/reset not available yet, skipping UKF reset')
+            return
+        req = ResetSim.Request()
+        req.new_initial_state = self._state_msg(self.mmg_state, self.delta, self.n)
+        req.use_default = False
+        self._call_sync(self.ukf_reset_client, req)
 
     # ------------------------------------------------------------------
     def _state_msg(self, mmg_state, delta, n) -> VesselState:
@@ -200,23 +237,28 @@ class MmgNode(Node):
         msg.n = float(n)
         return msg
 
-    def _measure(self, true_msg: VesselState) -> VesselState:
+    def _measure_sensor(self, true_msg: VesselState, true_accel) -> SensorMeasurement:
         """In-process replacement for the old sensor_node's /sensor/measure
-        service: true_msg in, (possibly corrupted) measured VesselState out.
-        Also publishes /sensor/measured_state, same as sensor_node did."""
+        service: true_msg + true (ax,ay) in, a (possibly corrupted)
+        SensorMeasurement out -- GPS/compass/gyro/IMU-accel/actuator-encoders,
+        explicitly no u,v (reconstructing those is ukf_node's job). Also
+        publishes /sensor/measured_state, same as sensor_node did."""
+        ax_true, ay_true = true_accel
+        measured = SensorMeasurement()
+        measured.header.stamp = self.get_clock().now().to_msg()
+        measured.header.frame_id = true_msg.header.frame_id
+
         if not self._sensor_enabled:
-            measured = true_msg
+            measured.x, measured.y, measured.psi, measured.r = true_msg.x, true_msg.y, true_msg.psi, true_msg.r
+            measured.ax, measured.ay = float(ax_true), float(ay_true)
+            measured.delta, measured.n = true_msg.delta, true_msg.n
         else:
             mmg_state = [true_msg.u, true_msg.v, true_msg.r, true_msg.x, true_msg.y, true_msg.psi]
-            mmg_state_meas, delta_meas, n_meas = self.sensor_model.measure(mmg_state, true_msg.delta, true_msg.n)
-
-            measured = VesselState()
-            measured.header.stamp = self.get_clock().now().to_msg()
-            measured.header.frame_id = true_msg.header.frame_id
-            measured.u, measured.v, measured.r, measured.x, measured.y, measured.psi = \
-                [float(v) for v in mmg_state_meas]
-            measured.delta = float(delta_meas)
-            measured.n = float(n_meas)
+            r_m, x_m, y_m, psi_m, ax_m, ay_m, delta_m, n_m = self.sensor_model.measure(
+                mmg_state, true_msg.delta, true_msg.n, accel_true=(ax_true, ay_true))
+            measured.x, measured.y, measured.psi, measured.r = float(x_m), float(y_m), float(psi_m), float(r_m)
+            measured.ax, measured.ay = float(ax_m), float(ay_m)
+            measured.delta, measured.n = float(delta_m), float(n_m)
 
         self.measured_pub.publish(measured)
         return measured
@@ -255,40 +297,72 @@ class MmgNode(Node):
         self.current_pub.publish(current_msg)
         self.wave_pub.publish(wave_msg)
 
-        return (current_msg.vx, current_msg.vy), (wave_msg.fx, wave_msg.fy, wave_msg.fn)
+        return current_msg, (wave_msg.fx, wave_msg.fy, wave_msg.fn)
+
+    def _call_sync(self, client, request):
+        """Shared busy-wait-on-async-future pattern: deliberately not
+        rclpy.spin_until_future_complete(), since this callback already runs
+        inside the node's own executor and that would re-enter it and
+        deadlock. The response callback runs concurrently on another executor
+        thread (see the callback groups set up in __init__). Returns the
+        response, or None on failure (exception or shutdown) -- caller decides
+        how to handle a None."""
+        future = client.call_async(request)
+        while rclpy.ok() and not future.done():
+            time.sleep(0.0005)
+        if not rclpy.ok():
+            return None
+        if future.exception() is not None:
+            self.get_logger().error(f'{client.service_name} call failed: {future.exception()}')
+            return None
+        return future.result()
 
     def _tick(self):
         if not self._have_initial_state or not self._running:
             return
 
         true_msg = self._state_msg(self.mmg_state, self.delta, self.n)
-        measured_msg = self._measure(true_msg)
+
+        current_msg, wave_force = self._sample_disturbance(
+            float(self.mmg_state[5]), true_msg.header.stamp, true_msg.header.frame_id)
+        current = (current_msg.vx, current_msg.vy)
+
+        true_accel_dm = self.accel_fn(ca.DM(self.mmg_state), ca.DM([self.delta, self.n]),
+                                       ca.DM(list(current)), ca.DM(list(wave_force)))
+        true_accel = (float(true_accel_dm[0]), float(true_accel_dm[1]))
+
+        sensor_msg = self._measure_sensor(true_msg, true_accel)
+
+        if not self.solve_client.service_is_ready() or not self.ukf_client.service_is_ready():
+            self.get_logger().warn('/nmpc/solve or /ukf/estimate not available yet, skipping tick',
+                                    throttle_duration_sec=2.0)
+            return
+
+        ukf_req = EstimateState.Request()
+        ukf_req.measurement = sensor_msg
+        ukf_response = self._call_sync(self.ukf_client, ukf_req)
+        ukf_ok = ukf_response is not None and ukf_response.success
+        if ukf_response is not None and not ukf_response.success:
+            self.get_logger().warn(f'/ukf/estimate reported failure: {ukf_response.return_status}',
+                                    throttle_duration_sec=2.0)
+        # A transient UKF failure (or use_ukf=False) falls back to the true
+        # state for this tick's NMPC request rather than skipping the tick
+        # entirely -- a deliberate, revisitable safety choice; the
+        # alternative is to skip the tick the way a not-ready /nmpc/solve is
+        # handled above.
 
         request = SolveNMPC.Request()
-        request.state = measured_msg
+        request.state = ukf_response.estimated_state if (self.use_ukf and ukf_ok) else true_msg
+        # Current feedforward is always on, independent of use_ukf (which only
+        # picks the *state* source above): UKF's estimate when enabled/healthy,
+        # otherwise the true current already sampled this tick.
+        request.current = ukf_response.estimated_current if (self.use_ukf and ukf_ok) else current_msg
 
-        if not self.solve_client.service_is_ready():
-            self.get_logger().warn('/nmpc/solve not available yet, skipping tick', throttle_duration_sec=2.0)
+        response = self._call_sync(self.solve_client, request)
+        if response is None:
             return
 
-        future = self.solve_client.call_async(request)
-        # deliberately not rclpy.spin_until_future_complete(): this callback
-        # already runs inside the node's own executor, so that would re-enter
-        # the executor and deadlock. Busy-wait instead; the response callback
-        # runs concurrently on another executor thread (see callback groups above).
-        while rclpy.ok() and not future.done():
-            time.sleep(0.0005)
-        if not rclpy.ok():
-            return
-        if future.exception() is not None:
-            self.get_logger().error(f'/nmpc/solve call failed: {future.exception()}')
-            return
-
-        response = future.result()
         delta, n = response.command.delta, response.command.n
-
-        current, wave_force = self._sample_disturbance(
-            float(self.mmg_state[5]), true_msg.header.stamp, true_msg.header.frame_id)
 
         state_ca = ca.DM(self.mmg_state)
         control_ca = ca.DM([delta, n])

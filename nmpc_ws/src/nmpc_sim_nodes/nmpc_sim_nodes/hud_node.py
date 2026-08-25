@@ -32,11 +32,16 @@ class HUDNode(Node):
         self.create_subscription(CurrentState, '/env/current_state', self._on_current_state, 10)
         self.create_subscription(WaveState, '/env/wave_state', self._on_wave_state, 10)
         self.create_subscription(PredictionHorizon, '/nmpc/prediction_horizon', self._on_prediction_horizon, 10)
+        self.create_subscription(CurrentState, '/ukf/estimated_current', self._on_ukf_current, 10)
 
         self.get_logger().info('hud_node up: current compass + wave-force scatter + control-horizon companion window')
 
     def _on_current_state(self, msg: CurrentState):
         self.bridge.update_current(CurrentReading(
+            vx=msg.vx, vy=msg.vy, speed=msg.speed, heading=msg.heading, enabled=msg.enabled))
+
+    def _on_ukf_current(self, msg: CurrentState):
+        self.bridge.update_ukf_current(CurrentReading(
             vx=msg.vx, vy=msg.vy, speed=msg.speed, heading=msg.heading, enabled=msg.enabled))
 
     def _on_wave_state(self, msg: WaveState):

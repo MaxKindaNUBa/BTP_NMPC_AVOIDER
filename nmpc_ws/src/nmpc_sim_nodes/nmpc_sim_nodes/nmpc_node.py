@@ -1,5 +1,5 @@
 """nmpc_node: pure optimizer (section 2.6 of ROS2_CONVERSION_PLAN.md). Serves
-/nmpc/solve, wrapping AcadosNMPC.solve()/CasadiNMPC.solve() unchanged; caches
+/nmpc/solve, wrapping AcadosNMPC.solve() (SQP-RTI) unchanged; caches
 the latest /map/active_reference and /map/obstacles for use inside the next
 solve() call; also broadcasts the same result on three topics for passive
 consumers (viz_node, diagnostics).
@@ -74,7 +74,6 @@ _SCALAR_CONFIG_FIELDS = [
     'EPS',
     'SIGMA', 'W_SLACK', 'OBSTACLE_START_K', 'MAX_OBSTACLES',
     'QE_SCALE',
-    'IPOPT_MAX_ITER', 'IPOPT_TOL', 'IPOPT_PRINT_LEVEL',
     'ACADOS_QP_SOLVER', 'ACADOS_NLP_SOLVER', 'ACADOS_INTEGRATOR',
     'ACADOS_NUM_STAGES', 'ACADOS_NUM_STEPS',
 ]
@@ -97,17 +96,9 @@ class NmpcNode(Node):
 
         self.config = self._declare_and_build_config()
 
-        self.declare_parameter('solver_backend', 'acados')
-        backend = self.get_parameter('solver_backend').value
-        self.get_logger().info(f'building NMPC solver (backend={backend})... this triggers code-gen on first run')
-        if backend == 'acados':
-            from nmpc.nmpc_acados import AcadosNMPC
-            self.solver = AcadosNMPC(self.config)
-        elif backend == 'casadi':
-            from nmpc.nmpc_casadi import CasadiNMPC
-            self.solver = CasadiNMPC(self.config)
-        else:
-            raise ValueError(f"Unknown solver_backend {backend!r}; expected 'acados' or 'casadi'")
+        self.get_logger().info('building NMPC solver (acados SQP-RTI)... this triggers code-gen on first run')
+        from nmpc.nmpc_acados import AcadosNMPC
+        self.solver = AcadosNMPC(self.config)
         self.get_logger().info('NMPC solver ready')
 
         self._active_reference = None   # nmpc_interfaces.msg.ActiveReference, cached
@@ -213,6 +204,7 @@ class NmpcNode(Node):
         state = request.state  # already the measured state -- see module docstring
         mmg_state = [state.u, state.v, state.r, state.x, state.y, state.psi]
         delta, n = float(state.delta), float(state.n)
+        current = (float(request.current.vx), float(request.current.vy))
 
         if self._active_reference is not None:
             ref = self._active_reference
@@ -223,7 +215,8 @@ class NmpcNode(Node):
             self.get_logger().warn('no /map/active_reference received yet, holding current pose', throttle_duration_sec=2.0)
             chi_p, x_d, y_d = state.psi, state.x, state.y
 
-        result = self.solver.solve(mmg_state, delta, n, chi_p, x_d, y_d, obstacles=self._obstacles_cache)
+        result = self.solver.solve(mmg_state, delta, n, chi_p, x_d, y_d,
+                                    obstacles=self._obstacles_cache, current=current)
 
         # Raw controller-effort sample: cheap numpy slicing only (arrays already
         # exist in `result`), then a non-blocking hand-off -- no metric arithmetic,
