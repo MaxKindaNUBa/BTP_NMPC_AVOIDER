@@ -27,6 +27,10 @@ def generate_launch_description():
             output='screen', parameters=[params_file],
         ),
         Node(
+            package='nmpc_sim_nodes', executable='ukf_node', name='ukf_node',
+            output='screen', parameters=[params_file],
+        ),
+        Node(
             package='nmpc_sim_nodes', executable='mmg_node', name='mmg_node',
             output='screen', parameters=[params_file],
         ),

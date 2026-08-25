@@ -333,6 +333,30 @@ def make_casadi_integrator(h, method="rk4", smooth=True, scale=1000.0, sym_type=
 
     return ca.Function(f"{method}_step", inputs, [nxt_state, r_dot_a], input_names, ["next_state", "r_dot_a"])
 
+def make_casadi_accel_function(sym_type=ca.MX):
+    """(state, control, current, wave_force) -> accel [u_dot, v_dot], body-frame.
+
+    Exposes MMG_Time_Derivative_casadi's otherwise-discarded X_acc[0:2] -- the
+    surge/sway acceleration terms that make_casadi_integrator computes
+    internally on the way to `dstate` but never returns (its second output,
+    r_dot_a, is only the yaw-rate acceleration). Used to synthesize an IMU
+    accelerometer reading: mmg_node evaluates this at the true state/control/
+    current/wave_force each tick to get the "true" (ax, ay) an accelerometer
+    would sense; ukf_node's measurement model evaluates it at each sigma
+    point's predicted state to get the corresponding nonlinear ax/ay rows.
+    Purely additive -- does not touch MMG_Time_Derivative_casadi or
+    make_casadi_integrator's existing signatures/behavior.
+    """
+    state = sym_type.sym("state", 6)
+    control = sym_type.sym("control", 2)
+    current = sym_type.sym("current", 2)
+    wave_force = sym_type.sym("wave_force", 3)
+    dstate = MMG_Time_Derivative_casadi(state, control, (current[0], current[1]),
+                                         (wave_force[0], wave_force[1], wave_force[2]))
+    return ca.Function("mmg_accel", [state, control, current, wave_force], [dstate[:2]],
+                        ["state", "control", "current", "wave_force"], ["accel"])
+
+
 def make_acados_integrator(h, smooth=True, scale=1000.0):
     """
     Creates an acados SimSolver for the MMG model using RK4 (explicit Runge-Kutta).

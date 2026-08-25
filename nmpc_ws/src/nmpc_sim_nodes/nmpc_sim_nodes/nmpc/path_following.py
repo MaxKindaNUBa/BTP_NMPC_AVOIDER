@@ -102,7 +102,9 @@ def select_active_waypoint(x, y, waypoints, current_idx, wp_radius: float = None
                             config=DEFAULT_CONFIG) -> int:
     """Advances current_idx to current_idx+1 once the ship has either come within
     wp_radius of the target waypoint, OR crossed the perpendicular "gate" plane
-    through it (projection of (x,y) onto the prev_wp->wp leg direction is past wp).
+    through it WITHIN wp_radius of it laterally too (projection of (x,y) onto
+    the prev_wp->wp leg direction is past wp, AND the cross-track/perpendicular
+    offset from the leg line at that point is <= wp_radius).
 
     The radius-only check can fail to fire forever: a large initial heading error
     makes the turning transient converge onto the path's line well beyond the
@@ -111,6 +113,20 @@ def select_active_waypoint(x, y, waypoints, current_idx, wp_radius: float = None
     catches this because it only cares about progress along the leg direction,
     not lateral offset, so it fires exactly once as the ship passes abeam of the
     waypoint no matter how wide the turn was.
+
+    CROSS-TRACK BOUND ADDED 2026-08-25: the gate used to accept ANY lateral
+    offset once past the waypoint's along-track position -- fine for a wide
+    turning transient (which stays close to the line), but a real bug for an
+    obstacle-avoidance detour: this project's scenarios route obstacles with
+    radii up to ~6m right next to waypoints (see scenario.json), so a detour
+    swinging 6-10m off the path line crosses the gate plane FAR from the
+    actual waypoint and was being accepted as "reached" -- observed live via
+    rviz_node.py: the active-waypoint marker jumped straight to the final
+    endpoint while the ship was still visibly nowhere near the middle
+    waypoint. Bounding the gate to wp_radius laterally (the same radius
+    already used for the direct-hit check) closes that off while leaving the
+    original wide-turning-transient fix intact, since that case has small
+    cross-track offset by construction.
     """
     if wp_radius is None:
         wp_radius = config.WP_RADIUS
@@ -128,9 +144,14 @@ def select_active_waypoint(x, y, waypoints, current_idx, wp_radius: float = None
         if leg_len > 1e-9:
             # along-track position of (x,y) relative to wp, projected onto the
             # leg direction; >= 0 once (x,y) has crossed the plane through wp
-            # perpendicular to the leg, regardless of cross-track offset there.
+            # perpendicular to the leg. cross: the perpendicular/lateral offset
+            # at that same point (Pythagoras against the direct dist above,
+            # since along and cross are orthogonal components of the same
+            # (x,y)-to-wp vector) -- bounded to wp_radius so a wide detour far
+            # off the line doesn't count as "reached" just for being past it.
             along = ((x - wp[0]) * leg_dx + (y - wp[1]) * leg_dy) / leg_len
-            reached = along >= 0.0
+            cross = np.sqrt(max(0.0, dist ** 2 - along ** 2))
+            reached = along >= 0.0 and cross <= wp_radius
 
     if reached and current_idx < last_idx:
         current_idx += 1   # close enough, or already passed it -> move to next leg

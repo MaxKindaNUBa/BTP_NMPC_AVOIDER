@@ -129,11 +129,14 @@ class RvizNode(Node):
         self._prediction_marker = None
         self._active_wp_marker = None
         self._current_marker = None
+        self._ukf_current_marker = None  # UKF-predicted current arrow, alongside the actual one
         self._wave_marker = None
         self._last_vessel = None  # (x, y, psi), for current/wave arrows -- set by _on_mmg_state
         self._trail_points = collections.deque(maxlen=_TRAIL_MAX_POINTS)
         self._current_state_msg = None  # latest /env/current_state, for the top-right env_overlay
         self._wave_state_msg = None     # latest /env/wave_state, for the top-right env_overlay
+        self._ukf_current_msg = None    # latest /ukf/estimated_current, for env_overlay's "| predicted" column
+        self._ukf_state_msg = None      # latest /ukf/estimated_state, for status_overlay's x/y "| predicted" column
 
         # cached, used by the /viz/status_text telemetry block (mirrors visualizer.py's info_text)
         self._goal = waypoints[-1]
@@ -154,6 +157,8 @@ class RvizNode(Node):
         self.create_subscription(SimStatus, '/map/sim_status', self._on_sim_status, _LATCHED_QOS)
         self.create_subscription(CurrentState, '/env/current_state', self._on_current_state, 10)
         self.create_subscription(WaveState, '/env/wave_state', self._on_wave_state, 10)
+        self.create_subscription(CurrentState, '/ukf/estimated_current', self._on_ukf_current, 10)
+        self.create_subscription(VesselState, '/ukf/estimated_state', self._on_ukf_state, 10)
 
         self.get_logger().info(f'rviz_node up: {len(waypoints)} waypoints, {len(self._obstacle_markers)} obstacles; '
                                 f'publishing MarkerArray on /viz/markers, telemetry on /viz/status_text')
@@ -224,7 +229,7 @@ class RvizNode(Node):
         self.status_pub.publish(String(data=self._build_status_text(msg)))
         self.status_overlay_pub.publish(_overlay_text(
             self._build_status_text(msg), OverlayText.LEFT, OverlayText.BOTTOM,
-            horizontal_distance=10, vertical_distance=10, width=300, height=230))
+            horizontal_distance=10, vertical_distance=10, width=340, height=260))
         self._publish_all()
 
     def _on_prediction_horizon(self, msg: PredictionHorizon):
@@ -271,6 +276,25 @@ class RvizNode(Node):
         self._publish_env_overlay()
         self._publish_all()
 
+    def _on_ukf_current(self, msg: CurrentState):
+        # Same arrow convention as the actual-current one (_on_current_state),
+        # a distinct color so both can be told apart at a glance -- drawn from
+        # the same vessel position since they're both "current AT the ship,
+        # now", just measured (msg.enabled) vs UKF-estimated.
+        if self._last_vessel is None:
+            self._ukf_current_marker = None
+        else:
+            x, y, _ = self._last_vessel
+            self._ukf_current_marker = _arrow_marker(
+                'ukf_current', 0, x, y, msg.heading, msg.speed * _CURRENT_ARROW_GAIN,
+                _color(0.7, 0.3, 1.0, 0.85))
+        self._ukf_current_msg = msg
+        self._publish_env_overlay()
+        self._publish_all()
+
+    def _on_ukf_state(self, msg: VesselState):
+        self._ukf_state_msg = msg
+
     def _on_wave_state(self, msg: WaveState):
         if not msg.enabled or self._last_vessel is None:
             self._wave_marker = None
@@ -297,11 +321,24 @@ class RvizNode(Node):
             return
 
         if c.enabled:
-            current_text = (
-                f"Speed   : {c.speed:7.4f} m/s\n"
-                f"Heading : {math.degrees(c.heading):7.2f} deg\n"
-                f"Vx, Vy  : {c.vx:7.4f}, {c.vy:7.4f} m/s"
-            )
+            # "| <predicted>" appended straight after each actual value, from
+            # /ukf/estimated_current -- same lines, no new rows, so actual vs
+            # UKF-estimated current can be compared at a glance without a
+            # second overlay. Omitted (falls back to actual-only) until the
+            # first UKF message arrives.
+            u = self._ukf_current_msg
+            if u is not None:
+                current_text = (
+                    f"Speed   : {c.speed:7.4f} | {u.speed:7.4f} m/s\n"
+                    f"Heading : {math.degrees(c.heading):7.2f} | {math.degrees(u.heading):7.2f} deg\n"
+                    f"Vx, Vy  : {c.vx:7.4f}, {c.vy:7.4f} | {u.vx:7.4f}, {u.vy:7.4f} m/s"
+                )
+            else:
+                current_text = (
+                    f"Speed   : {c.speed:7.4f} m/s\n"
+                    f"Heading : {math.degrees(c.heading):7.2f} deg\n"
+                    f"Vx, Vy  : {c.vx:7.4f}, {c.vy:7.4f} m/s"
+                )
         else:
             current_text = "off"
 
@@ -319,7 +356,7 @@ class RvizNode(Node):
         text = f"=== CURRENT ===\n{current_text}\n\n=== WAVE ===\n{wave_text}"
         self.env_overlay_pub.publish(_overlay_text(
             text, OverlayText.RIGHT, OverlayText.TOP,
-            horizontal_distance=10, vertical_distance=10, width=300, height=230))
+            horizontal_distance=10, vertical_distance=10, width=380, height=230))
 
     def _build_status_text(self, msg: VesselState) -> str:
         # mirrors mpc_visualization/visualizer.py's info_text block (SHIP STATUS /
@@ -332,8 +369,18 @@ class RvizNode(Node):
             (math.hypot(ship_pos[0] - ox, ship_pos[1] - oy) - orad for ox, oy, orad in self._obstacles_xyr),
             default=float('inf'))
 
+        # "| <predicted>" appended straight after X/Y's actual value, from
+        # /ukf/estimated_state -- same lines, no new columns, matching the
+        # env_overlay's actual-vs-UKF-current convention above. Omitted
+        # (falls back to actual-only) until the first UKF message arrives.
+        s = self._ukf_state_msg
+        x_line = f"X         : {msg.x:6.2f} | {s.x:6.2f} m\n" if s is not None else f"X         : {msg.x:6.2f} m\n"
+        y_line = f"Y         : {msg.y:6.2f} | {s.y:6.2f} m\n" if s is not None else f"Y         : {msg.y:6.2f} m\n"
+
         return (
             f"=== SHIP STATUS ===\n"
+            f"{x_line}"
+            f"{y_line}"
             f"u (Surge) : {msg.u:6.3f} m/s\n"
             f"v (Sway)  : {msg.v:6.3f} m/s\n"
             f"r (Yaw Rt): {msg.r:6.3f} rad/s\n"
@@ -356,7 +403,7 @@ class RvizNode(Node):
     def _publish_all(self):
         markers = list(self._path_markers) + list(self._obstacle_markers)
         for m in (self._active_wp_marker, self._trail_marker, self._prediction_marker, self._ship_marker,
-                  self._current_marker, self._wave_marker):
+                  self._current_marker, self._ukf_current_marker, self._wave_marker):
             if m is not None:
                 markers.append(m)
         now = self.get_clock().now().to_msg()

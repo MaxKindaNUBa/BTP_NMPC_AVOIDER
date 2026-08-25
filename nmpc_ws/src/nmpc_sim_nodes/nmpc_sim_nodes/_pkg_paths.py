@@ -35,6 +35,21 @@ def ensure_on_path():
         sys.path.insert(0, _MPC_VISUALIZATION_DIR)
 
 
+def repo_root() -> str:
+    """Walks upward from this file looking for a `.git` or `nmpc_ws` marker --
+    same search experiment_logger.py's own _find_repo_root() does, kept here
+    too so any standalone test_*.py script can resolve a repo-relative output
+    directory (e.g. nmpc_sim_logs/) without hardcoding a fixed number of `..`s,
+    which would break between running from source and running the installed
+    copy (different tree depths). Falls back to $HOME if no marker is found."""
+    curr = _PKG_DIR
+    while curr != os.path.dirname(curr):
+        if os.path.exists(os.path.join(curr, ".git")) or os.path.exists(os.path.join(curr, "nmpc_ws")):
+            return curr
+        curr = os.path.dirname(curr)
+    return os.path.expanduser("~")
+
+
 def sim_params_path() -> str:
     """Resolves params/sim_params.yaml: package share dir when installed (the
     ros2 run / launch case), source-tree-relative fallback when a standalone

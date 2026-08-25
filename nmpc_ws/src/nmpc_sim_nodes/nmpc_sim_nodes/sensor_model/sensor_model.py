@@ -1,8 +1,12 @@
 """SensorModel: composes the section-2 primitives into the section-3
 per-signal specs and section-5 cross-signal rules. Stateful across calls
-(OU bias values, static actuator offsets, previous measured position for the
-"heavy" derived-velocity mode) -- one instance per run, stepped once per
-solver tick (dt = config.dt, matching the rest of the sim).
+(OU bias values, static actuator offsets) -- one instance per run, stepped
+once per solver tick (dt = config.dt, matching the rest of the sim).
+
+This model measures GPS position (x,y), compass/AHRS heading (psi), rate
+gyro (r), IMU accelerometer (ax,ay), and actuator encoders (delta,n) --
+explicitly not surge/sway velocity (u,v) directly; reconstructing u,v (and
+estimating ocean current) from this sensor set is ukf_node's job.
 
 Independence (section 5): every signal below draws from its own RNG stream
 (one child generator per signal, spawned from a single run seed), so no two
@@ -30,11 +34,12 @@ class SensorModel:
         self.config = config
         self.dt = float(dt)
 
-        # 9 independent signal streams: x, y, psi, r, u, v (direct mode only),
-        # delta, n, plus one spare for outlier draws on x/y.
+        # 8 independent signal streams: x, y, psi, r, accel (ax+ay share one,
+        # same convention the old u,v channel used), delta, n, plus one spare
+        # for outlier draws on x/y.
         seeds = np.random.SeedSequence(seed).spawn(8)
         (self._rng_x, self._rng_y, self._rng_psi, self._rng_r,
-         self._rng_uv, self._rng_delta, self._rng_n, self._rng_outlier) = (
+         self._rng_accel, self._rng_delta, self._rng_n, self._rng_outlier) = (
             np.random.default_rng(s) for s in seeds)
 
         c = config
@@ -49,27 +54,27 @@ class SensorModel:
         self._bias_r = GaussMarkov(self._rng_r, dt, c.r_bias_tau, c.r_bias_sigma)
         self._white_r = WhiteGaussian(self._rng_r, c.r_white_sigma)
 
-        # "direct" mode (light preset): small white + small static bias on u, v.
-        self._bias_u = StaticOffset(self._rng_uv, c.uv_bias_sigma)
-        self._bias_v = StaticOffset(self._rng_uv, c.uv_bias_sigma)
-        self._white_u = WhiteGaussian(self._rng_uv, c.uv_white_sigma)
-        self._white_v = WhiteGaussian(self._rng_uv, c.uv_white_sigma)
+        # IMU accelerometer (ax, ay): white + Gauss-Markov bias-instability
+        # drift, same two-component shape as psi/r above.
+        self._bias_ax = GaussMarkov(self._rng_accel, dt, c.accel_bias_tau, c.accel_bias_sigma)
+        self._bias_ay = GaussMarkov(self._rng_accel, dt, c.accel_bias_tau, c.accel_bias_sigma)
+        self._white_ax = WhiteGaussian(self._rng_accel, c.accel_white_sigma)
+        self._white_ay = WhiteGaussian(self._rng_accel, c.accel_white_sigma)
 
         self._offset_delta = StaticOffset(self._rng_delta, c.delta_bias_sigma)
         self._white_delta = WhiteGaussian(self._rng_delta, c.delta_white_sigma)
         self._offset_n = StaticOffset(self._rng_n, c.n_bias_sigma)
         self._white_n = WhiteGaussian(self._rng_n, c.n_white_sigma)
 
-        # "derived" mode (heavy preset) state: previous step's measured x, y,
-        # used to finite-difference a velocity per section 2.h/3.4. None until
-        # the first call, at which point there is nothing to differentiate
-        # against yet.
-        self._prev_meas_xy = None
-
-    def measure(self, mmg_state, delta: float, n: float):
-        """mmg_state = [u, v, r, x, y, psi] (true). Returns a new
-        (mmg_state_meas, delta_meas, n_meas) -- never mutates the input."""
-        u, v, r, x, y, psi = (float(s) for s in mmg_state)
+    def measure(self, mmg_state, delta: float, n: float, accel_true=(0.0, 0.0)):
+        """mmg_state = [u, v, r, x, y, psi] (true; u,v are used only to
+        satisfy this signature's existing callers -- they are NOT measured).
+        accel_true = (ax, ay) body-frame true acceleration, since this class
+        has no dynamics knowledge of its own and can't compute it itself.
+        Returns (r_meas, x_meas, y_meas, psi_meas, ax_meas, ay_meas,
+        delta_meas, n_meas) -- never mutates the input."""
+        _, _, r, x, y, psi = (float(s) for s in mmg_state)
+        ax, ay = (float(s) for s in accel_true)
         c = self.config
 
         x_meas = x + self._bias_x.step() + self._white_x.sample()
@@ -79,32 +84,10 @@ class SensorModel:
 
         r_meas = r + self._bias_r.step() + self._white_r.sample()
 
-        if c.velocity_mode == "direct":
-            u_meas = u + self._bias_u.step() + self._white_u.sample()
-            v_meas = v + self._bias_v.step() + self._white_v.sample()
-        else:
-            u_meas, v_meas = self._derive_velocity(x_meas, y_meas, psi_meas, u, v)
+        ax_meas = ax + self._bias_ax.step() + self._white_ax.sample()
+        ay_meas = ay + self._bias_ay.step() + self._white_ay.sample()
 
         delta_meas = quantize(delta + self._offset_delta.step() + self._white_delta.sample(), c.delta_lsb)
         n_meas = quantize(n + self._offset_n.step() + self._white_n.sample(), c.n_lsb)
 
-        return np.array([u_meas, v_meas, r_meas, x_meas, y_meas, psi_meas], dtype=float), delta_meas, n_meas
-
-    def _derive_velocity(self, x_meas, y_meas, psi_meas, u_true, v_true):
-        """Section 3.4 'GPS-derived' + 2.h: finite-difference the noisy
-        position, then rotate the inertial-frame rate into body-frame u, v
-        using the (also noisy) heading, since u/v are surge/sway, not
-        inertial x_dot/y_dot."""
-        if self._prev_meas_xy is None:
-            self._prev_meas_xy = (x_meas, y_meas)
-            return u_true, v_true  # first sample: nothing to differentiate against yet
-
-        x_prev, y_prev = self._prev_meas_xy
-        vx = (x_meas - x_prev) / self.dt
-        vy = (y_meas - y_prev) / self.dt
-        self._prev_meas_xy = (x_meas, y_meas)
-
-        cos_psi, sin_psi = math.cos(psi_meas), math.sin(psi_meas)
-        u_meas = vx * cos_psi + vy * sin_psi
-        v_meas = -vx * sin_psi + vy * cos_psi
-        return u_meas, v_meas
+        return r_meas, x_meas, y_meas, psi_meas, ax_meas, ay_meas, delta_meas, n_meas

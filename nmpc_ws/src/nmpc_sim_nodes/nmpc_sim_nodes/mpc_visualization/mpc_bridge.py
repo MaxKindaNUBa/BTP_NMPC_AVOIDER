@@ -45,6 +45,8 @@ class MPCBridgeState:
     active_waypoint: Optional[Tuple[float, float]] = None  # (x, y) target the NMPC is currently steering toward
     current: CurrentReading = None    # water current, for the compass HUD
     wave: WaveReading = None          # wave drift force, for the compass HUD
+    ukf_current: Optional[CurrentReading] = None      # /ukf/estimated_current, for the compass HUD's 2nd arrow
+    ukf_position: Optional[Tuple[float, float]] = None  # /ukf/estimated_state's (x, y), for the info_text "| predicted" column
 
 class MPCBridge:
     """
@@ -66,6 +68,8 @@ class MPCBridge:
         self._active_waypoint = None  # set via set_active_waypoint() once a multi-leg path is in play
         self._current = CurrentReading()  # set via update_current() once env_node is up
         self._wave = WaveReading()        # set via update_wave() once env_node is up
+        self._ukf_current = None          # set via update_ukf_current() once ukf_node is up
+        self._ukf_position = None         # set via update_ukf_position() once ukf_node is up
 
     def update_ship_state(self, state: np.ndarray, t: float):
         with self._lock:
@@ -90,6 +94,14 @@ class MPCBridge:
     def update_wave(self, wave: WaveReading):
         with self._lock:
             self._wave = wave
+
+    def update_ukf_current(self, ukf_current: CurrentReading):
+        with self._lock:
+            self._ukf_current = ukf_current
+
+    def update_ukf_position(self, position: Tuple[float, float]):
+        with self._lock:
+            self._ukf_position = tuple(position)
 
     def set_obstacles(self, obstacles: List[Obstacle]):
         with self._lock:
@@ -151,5 +163,7 @@ class MPCBridge:
                 goal=self._goal,
                 active_waypoint=self._active_waypoint,
                 current=self._current,
-                wave=self._wave
+                wave=self._wave,
+                ukf_current=self._ukf_current,
+                ukf_position=self._ukf_position
             )

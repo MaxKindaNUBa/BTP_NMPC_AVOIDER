@@ -77,6 +77,8 @@ class VizNode(Node):
         self.create_subscription(SimStatus, '/map/sim_status', self._on_sim_status, _LATCHED_QOS)
         self.create_subscription(CurrentState, '/env/current_state', self._on_current_state, 10)
         self.create_subscription(WaveState, '/env/wave_state', self._on_wave_state, 10)
+        self.create_subscription(CurrentState, '/ukf/estimated_current', self._on_ukf_current, 10)
+        self.create_subscription(VesselState, '/ukf/estimated_state', self._on_ukf_state, 10)
 
         self.get_logger().info(f'viz_node up: {len(waypoints)} waypoints, {len(obstacles)} obstacles, log_dir={log_dir}')
 
@@ -125,6 +127,13 @@ class VizNode(Node):
     def _on_current_state(self, msg: CurrentState):
         self.bridge.update_current(CurrentReading(
             vx=msg.vx, vy=msg.vy, speed=msg.speed, heading=msg.heading, enabled=msg.enabled))
+
+    def _on_ukf_current(self, msg: CurrentState):
+        self.bridge.update_ukf_current(CurrentReading(
+            vx=msg.vx, vy=msg.vy, speed=msg.speed, heading=msg.heading, enabled=msg.enabled))
+
+    def _on_ukf_state(self, msg: VesselState):
+        self.bridge.update_ukf_position((msg.x, msg.y))
 
     def _on_wave_state(self, msg: WaveState):
         # msg.fx/fy are body-frame (see CurrentState.msg/WaveState.msg); rotate into

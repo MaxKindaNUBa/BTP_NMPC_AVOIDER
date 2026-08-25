@@ -95,11 +95,6 @@ class NMPCConfig:
     R_DIAG: tuple
     QE_SCALE: float
 
-    # ---------------- IPOPT (CasADi debug solver) ----------------
-    IPOPT_MAX_ITER: int
-    IPOPT_TOL: float
-    IPOPT_PRINT_LEVEL: int
-
     # ---------------- Acados (deploy solver) ----------------
     ACADOS_QP_SOLVER: str
     ACADOS_NLP_SOLVER: str
@@ -172,9 +167,6 @@ def load_nmpc_config(path: str = None) -> NMPCConfig:
         Q_DIAG=tuple(float(v) for v in nmpc_p["Q_DIAG"]),
         R_DIAG=tuple(float(v) for v in nmpc_p["R_DIAG"]),
         QE_SCALE=float(nmpc_p["QE_SCALE"]),
-        IPOPT_MAX_ITER=int(nmpc_p["IPOPT_MAX_ITER"]),
-        IPOPT_TOL=float(nmpc_p["IPOPT_TOL"]),
-        IPOPT_PRINT_LEVEL=int(nmpc_p["IPOPT_PRINT_LEVEL"]),
         ACADOS_QP_SOLVER=str(nmpc_p["ACADOS_QP_SOLVER"]),
         ACADOS_NLP_SOLVER=str(nmpc_p["ACADOS_NLP_SOLVER"]),
         ACADOS_INTEGRATOR=str(nmpc_p["ACADOS_INTEGRATOR"]),

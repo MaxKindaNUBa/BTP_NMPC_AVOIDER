@@ -24,7 +24,7 @@ from env_model.current_model import CurrentModel  # noqa: E402
 from env_model.wave_model import WaveModel  # noqa: E402
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
-RESULTS_DIR = os.path.expanduser("~/nmpc_sim_logs/test_env_model_results")
+RESULTS_DIR = os.path.join(_pkg_paths.repo_root(), "nmpc_sim_logs", "test_env_model_results")
 
 
 def run_current(config: CurrentConfig, dt: float, sim_time: float) -> dict:

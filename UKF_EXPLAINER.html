@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Chasing the Current</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400;1,500&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,500;0,7..72,600;1,7..72,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --paper:#EFF3F1; --paper-raised:#E3E9E6; --paper-deep:#D7DFDB;
+    --ink:#16242B; --ink-soft:#4A5C61; --ink-faint:#7E8E90;
+    --line:rgba(22,36,43,.15); --line-strong:rgba(22,36,43,.34);
+    --teal:#1B6F65; --teal-soft:#CBE3DE; --teal-wash:#E2F0EC;
+    --rust:#B0522E; --rust-soft:#ECD2C2; --rust-wash:#F6E7DC;
+    --gold:#9C7420; --gold-soft:#E6D6A9; --gold-wash:#F2E9CE;
+    --shadow:0 1px 2px rgba(22,36,43,.07), 0 6px 20px rgba(22,36,43,.05);
+    --font-display:'Fraunces',Georgia,'Times New Roman',serif;
+    --font-body:'Literata',Georgia,'Times New Roman',serif;
+    --font-mono:'IBM Plex Mono','Courier New',monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#0D1A1D; --paper-raised:#122327; --paper-deep:#0A1417;
+      --ink:#E7EFEC; --ink-soft:#A7BCB9; --ink-faint:#6C8384;
+      --line:rgba(231,239,236,.14); --line-strong:rgba(231,239,236,.30);
+      --teal:#57D3C2; --teal-soft:#173934; --teal-wash:#122A28;
+      --rust:#F0895E; --rust-soft:#3B2317; --rust-wash:#2A1B13;
+      --gold:#E2B84F; --gold-soft:#382B10; --gold-wash:#2A2010;
+      --shadow:0 1px 2px rgba(0,0,0,.5), 0 6px 20px rgba(0,0,0,.35);
+    }
+  }
+  :root[data-theme="dark"]{
+    --paper:#0D1A1D; --paper-raised:#122327; --paper-deep:#0A1417;
+    --ink:#E7EFEC; --ink-soft:#A7BCB9; --ink-faint:#6C8384;
+    --line:rgba(231,239,236,.14); --line-strong:rgba(231,239,236,.30);
+    --teal:#57D3C2; --teal-soft:#173934; --teal-wash:#122A28;
+    --rust:#F0895E; --rust-soft:#3B2317; --rust-wash:#2A1B13;
+    --gold:#E2B84F; --gold-soft:#382B10; --gold-wash:#2A2010;
+    --shadow:0 1px 2px rgba(0,0,0,.5), 0 6px 20px rgba(0,0,0,.35);
+  }
+
+  *{box-sizing:border-box;}
+  html{-webkit-text-size-adjust:100%;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:var(--font-body); font-size:18px; line-height:1.65;
+    text-rendering:optimizeLegibility;
+  }
+  ::selection{ background:var(--teal-soft); }
+  a{ color:var(--teal); }
+  a:focus-visible, button:focus-visible, .railnav a:focus-visible{
+    outline:2px solid var(--teal); outline-offset:3px; border-radius:2px;
+  }
+  @media (prefers-reduced-motion: reduce){
+    *{ animation-duration:.001ms !important; transition-duration:.001ms !important; }
+  }
+
+  h1,h2,h3{ font-family:var(--font-display); font-weight:600; text-wrap:balance; color:var(--ink); }
+  h2{ font-size:clamp(1.7rem,1.3rem + 1.6vw,2.5rem); line-height:1.12; margin:0 0 .3em; }
+  h3{ font-size:1.28rem; font-weight:600; margin:2.1em 0 .5em; letter-spacing:.01em; }
+  p{ margin:0 0 1.15em; }
+  strong{ color:var(--ink); font-weight:600; }
+  .lede{ font-size:1.14em; color:var(--ink-soft); }
+
+  .eyebrow{
+    font-family:var(--font-mono); font-size:.72rem; font-weight:500;
+    letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint);
+    display:flex; align-items:center; gap:.6em; margin-bottom:.9em;
+  }
+  .eyebrow::before{ content:""; width:22px; height:1px; background:var(--line-strong); display:inline-block; }
+
+  .wrap{ max-width:1140px; margin:0 auto; padding:0 32px; }
+  .prose{ max-width:660px; }
+  .prose p, .prose ul, .prose ol{ max-width:660px; }
+
+  /* ---------- nav rail ---------- */
+  .railnav{
+    position:fixed; top:0; left:0; width:230px; height:100vh;
+    padding:40px 0 40px 34px; display:flex; flex-direction:column; justify-content:center;
+    gap:2px; z-index:20;
+  }
+  .railnav a{
+    font-family:var(--font-mono); font-size:.72rem; letter-spacing:.04em;
+    color:var(--ink-faint); text-decoration:none; padding:6px 0 6px 14px;
+    border-left:2px solid var(--line); transition:color .15s, border-color .15s;
+    display:block;
+  }
+  .railnav a span{ color:var(--ink-faint); margin-right:.6em; }
+  .railnav a:hover{ color:var(--ink); border-color:var(--line-strong); }
+  .railnav a.active{ color:var(--teal); border-color:var(--teal); }
+  .railnav a.active span{ color:var(--teal); }
+  @media (max-width:1180px){ .railnav{ display:none; } }
+  .page{ margin-left:0; }
+  @media (min-width:1181px){ .page{ margin-left:230px; } }
+
+  /* ---------- hero ---------- */
+  .hero{ position:relative; padding:100px 0 70px; overflow:hidden; }
+  .hero-bg{ position:absolute; inset:0; z-index:0; pointer-events:none; opacity:.55; }
+  .hero-inner{ position:relative; z-index:1; }
+  .hero h1{
+    font-family:var(--font-display); font-style:italic; font-weight:500;
+    font-size:clamp(2.6rem, 1.9rem + 3.6vw, 4.6rem); line-height:1.0;
+    margin:0 0 .32em; letter-spacing:-.01em;
+  }
+  .hero .lede{ max-width:600px; margin-bottom:2.3em; }
+  .hero figure{ margin:0; }
+
+  /* ---------- section chrome ---------- */
+  section{ padding:64px 0; border-top:1px solid var(--line); }
+  section.hero{ border-top:none; }
+  .kicker{
+    font-family:var(--font-mono); font-size:.78rem; color:var(--teal);
+    letter-spacing:.05em; display:flex; align-items:baseline; gap:.7em; margin-bottom:.6em;
+  }
+  .kicker .num{ font-size:1.5rem; font-weight:600; color:var(--ink-faint); font-family:var(--font-display); font-style:italic; }
+
+  /* ---------- figures ---------- */
+  figure{ margin:2.6em 0; }
+  figure.full{ margin-left:calc((660px - 100%) / -2 * -1); }
+  .diagram{
+    background:var(--paper-raised); border:1px solid var(--line);
+    border-radius:6px; padding:26px 26px 18px; box-shadow:var(--shadow);
+    color:var(--ink);
+  }
+  .diagram svg{ display:block; width:100%; height:auto; }
+  figcaption{
+    font-family:var(--font-mono); font-size:.82rem; color:var(--ink-soft);
+    margin-top:12px; line-height:1.55; max-width:660px;
+  }
+  figcaption b{ color:var(--ink); font-weight:600; }
+  .fig-wide{ max-width:960px; }
+  .fig-pair{ display:flex; gap:22px; flex-wrap:wrap; }
+  .fig-pair > div{ flex:1 1 260px; min-width:0; }
+  .fig-pair figcaption{ max-width:none; }
+
+  text{ font-family:var(--font-mono); }
+  .lbl{ font-size:11.5px; }
+  .lbl-lg{ font-size:13px; }
+  .ink-fill{ fill:var(--ink); } .ink-stroke{ stroke:var(--ink); }
+  .soft-fill{ fill:var(--ink-soft); } .soft-stroke{ stroke:var(--ink-soft); }
+  .faint-stroke{ stroke:var(--ink-faint); } .faint-fill{ fill:var(--ink-faint); }
+  .line-stroke{ stroke:var(--line-strong); }
+  .teal-fill{ fill:var(--teal); } .teal-stroke{ stroke:var(--teal); }
+  .teal-wash{ fill:var(--teal-wash); } .teal-soft-fill{ fill:var(--teal-soft); }
+  .rust-fill{ fill:var(--rust); } .rust-stroke{ stroke:var(--rust); }
+  .rust-wash{ fill:var(--rust-wash); } .rust-soft-fill{ fill:var(--rust-soft); }
+  .gold-fill{ fill:var(--gold); } .gold-stroke{ stroke:var(--gold); }
+  .gold-wash{ fill:var(--gold-wash); } .gold-soft-fill{ fill:var(--gold-soft); }
+  .paper-fill{ fill:var(--paper-raised); }
+  .nofill{ fill:none; }
+
+  /* ---------- legend chips ---------- */
+  .legend{ display:flex; gap:18px; flex-wrap:wrap; font-family:var(--font-mono); font-size:.76rem; color:var(--ink-soft); margin:.9em 0 1.8em; }
+  .legend span{ display:inline-flex; align-items:center; gap:.5em; }
+  .legend i{ width:14px; height:3px; border-radius:2px; display:inline-block; }
+  .legend i.true{ background:var(--ink); }
+  .legend i.measured{ background:var(--rust); }
+  .legend i.estimate{ background:var(--teal); }
+  .legend i.current{ background:var(--gold); }
+
+  /* ---------- pull note / aside ---------- */
+  .aside{
+    border-left:3px solid var(--gold); background:var(--gold-wash);
+    padding:16px 20px; border-radius:0 5px 5px 0; margin:1.8em 0;
+    font-size:.96em; color:var(--ink-soft); max-width:660px;
+  }
+  .aside b{ color:var(--ink); }
+
+  /* ---------- manifest (state list) ---------- */
+  .manifest{ background:var(--paper-raised); border:1px solid var(--line); border-radius:6px; box-shadow:var(--shadow); overflow:hidden; }
+  .manifest-group{ padding:22px 26px; border-bottom:1px solid var(--line); }
+  .manifest-group:last-child{ border-bottom:none; }
+  .manifest-group h4{
+    font-family:var(--font-mono); font-size:.74rem; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--ink-faint); margin:0 0 12px; font-weight:500;
+  }
+  .manifest-row{ display:flex; gap:18px; align-items:baseline; padding:7px 0; border-top:1px dashed var(--line); }
+  .manifest-row:first-of-type{ border-top:none; }
+  .manifest-row .sym{ font-family:var(--font-mono); font-size:1rem; color:var(--ink); width:118px; flex:none; font-weight:500; }
+  .manifest-row .desc{ color:var(--ink-soft); font-size:.94rem; }
+
+  /* ---------- stat tiles ---------- */
+  .stats{ display:flex; gap:22px; flex-wrap:wrap; }
+  .stat{ flex:1 1 260px; background:var(--paper-raised); border:1px solid var(--line); border-radius:6px; padding:22px 24px; box-shadow:var(--shadow); }
+  .stat .label{ font-family:var(--font-mono); font-size:.74rem; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:10px; }
+  .stat .num-row{ display:flex; align-items:baseline; gap:10px; font-family:var(--font-mono); font-variant-numeric:tabular-nums; flex-wrap:wrap; }
+  .stat .before{ font-size:1.3rem; color:var(--ink-faint); text-decoration:line-through; text-decoration-color:var(--line-strong); }
+  .stat .arrow{ color:var(--ink-faint); }
+  .stat .after{ font-size:1.85rem; color:var(--teal); font-weight:600; }
+  .stat .mult{ font-family:var(--font-mono); font-size:.82rem; color:var(--teal); background:var(--teal-wash); padding:2px 8px; border-radius:20px; margin-top:8px; display:inline-block; }
+  .stat .barchart{ display:flex; align-items:flex-end; gap:6px; height:34px; margin-top:14px; }
+  .stat .barchart .b{ width:16px; background:var(--ink-faint); border-radius:2px 2px 0 0; }
+  .stat .barchart .b.after{ background:var(--teal); }
+
+  /* ---------- glossary ---------- */
+  .gloss{ display:grid; grid-template-columns:150px 1fr; gap:2px 26px; }
+  .gloss dt{ font-family:var(--font-mono); font-weight:600; color:var(--ink); padding:14px 0; border-top:1px solid var(--line); grid-column:1; }
+  .gloss dd{ margin:0; padding:14px 0; border-top:1px solid var(--line); color:var(--ink-soft); grid-column:2; }
+  .gloss dd code{ font-family:var(--font-mono); font-size:.88em; background:var(--paper-deep); padding:1px 6px; border-radius:3px; color:var(--ink); }
+  sub{ font-size:.7em; }
+  @media (max-width:640px){ .gloss{ grid-template-columns:1fr; } .gloss dt{ padding-bottom:2px; border-top:1px solid var(--line);} .gloss dd{ padding-top:2px; border-top:none; } }
+
+  footer{ padding:60px 0 90px; color:var(--ink-faint); font-family:var(--font-mono); font-size:.8rem; line-height:1.8; }
+  footer a{ color:var(--ink-faint); text-decoration-color:var(--line-strong); }
+  code.inline{ font-family:var(--font-mono); font-size:.88em; background:var(--paper-deep); padding:1px 6px; border-radius:3px; }
+
+  @media (max-width:640px){
+    body{ font-size:16.5px; }
+    .wrap{ padding:0 20px; }
+    section{ padding:46px 0; }
+    .diagram{ padding:18px 16px 14px; }
+    .hero{ padding:64px 0 44px; }
+  }
+</style>
+
+<nav class="railnav" aria-label="Section navigation">
+  <a href="#hero" data-id="hero"><span>—</span>Chasing the Current</a>
+  <a href="#s01" data-id="s01"><span>01</span>Instruments</a>
+  <a href="#s02" data-id="s02"><span>02</span>Belief</a>
+  <a href="#s03" data-id="s03"><span>03</span>The bend</a>
+  <a href="#s04" data-id="s04"><span>04</span>Sigma points</a>
+  <a href="#s05" data-id="s05"><span>05</span>One cycle</a>
+  <a href="#s06" data-id="s06"><span>06</span>This project</a>
+  <a href="#gloss" data-id="gloss"><span>—</span>Glossary</a>
+</nav>
+
+<div class="page">
+<section class="hero" id="hero">
+  <div class="hero-bg" aria-hidden="true">
+    <svg viewBox="0 0 1140 520" preserveAspectRatio="xMidYMid slice" width="100%" height="520">
+      <g class="faint-stroke" fill="none" stroke-width="1" opacity="0.5">
+        <ellipse cx="900" cy="120" rx="520" ry="260"/>
+        <ellipse cx="900" cy="120" rx="400" ry="200"/>
+        <ellipse cx="900" cy="120" rx="280" ry="140"/>
+        <ellipse cx="900" cy="120" rx="160" ry="80"/>
+      </g>
+    </svg>
+  </div>
+  <div class="wrap hero-inner">
+    <div class="eyebrow">A field note on state estimation</div>
+    <h1>Chasing the&nbsp;Current</h1>
+    <p class="lede">How a small autonomous boat learns its true speed through the water, and the ocean current quietly shoving it sideways &mdash; from four instruments that never measure either one, built up from nothing, then traced into the real filter running this project.</p>
+
+    <figure>
+      <div class="diagram">
+        <svg viewBox="0 0 880 470" role="img" aria-label="Top-down diagram of a small boat with four onboard instruments listed below it, and two dashed arrows for the boat's true water-speed and the ocean current, both labeled as not sensed by any instrument.">
+          <g class="faint-stroke" fill="none" stroke-width="1" stroke-dasharray="2 4">
+            <line x1="60" y1="60" x2="820" y2="60"/>
+          </g>
+          <!-- hull -->
+          <path class="paper-fill line-stroke" stroke-width="1.4"
+            d="M440 62 C476 96 496 150 496 224 C496 268 474 292 440 300 C406 292 384 268 384 224 C384 150 404 96 440 62 Z"/>
+          <!-- current arrow (gold, diagonal) -->
+          <g class="gold-stroke" stroke-width="2" fill="none" stroke-dasharray="6 5">
+            <line x1="300" y1="330" x2="560" y2="150" marker-end="url(#arrGold)"/>
+          </g>
+          <text x="565" y="140" class="lbl gold-fill" text-anchor="start">current &mdash; v<tspan baseline-shift="sub" font-size="8">cx</tspan>, v<tspan baseline-shift="sub" font-size="8">cy</tspan></text>
+          <text x="565" y="156" class="lbl faint-fill" text-anchor="start">not sensed &mdash; only inferred</text>
+          <!-- u arrow along hull axis -->
+          <g class="teal-stroke" stroke-width="2" fill="none" stroke-dasharray="6 5">
+            <line x1="440" y1="288" x2="440" y2="90" marker-end="url(#arrTeal)"/>
+          </g>
+          <text x="450" y="120" class="lbl teal-fill" text-anchor="start">u &mdash; speed through water</text>
+          <text x="450" y="136" class="lbl faint-fill" text-anchor="start">not sensed &mdash; only inferred</text>
+
+          <defs>
+            <marker id="arrGold" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 Z" class="gold-fill"/>
+            </marker>
+            <marker id="arrTeal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 Z" class="teal-fill"/>
+            </marker>
+          </defs>
+
+          <!-- instrument row -->
+          <g transform="translate(0,352)">
+            <!-- GPS -->
+            <g transform="translate(30,0)">
+              <text class="lbl-lg ink-fill" font-weight="600" x="0" y="14">GPS</text>
+              <text class="lbl faint-fill" x="0" y="30">reads x, y</text>
+              <polyline points="0,54 20,54 30,50 40,58 50,49 60,55 70,52 80,54 90,54" class="rust-stroke nofill" stroke-width="1.6"/>
+              <line x1="0" y1="54" x2="90" y2="54" class="faint-stroke" stroke-width="1" stroke-dasharray="2 3"/>
+              <text class="lbl faint-fill" x="0" y="72">jitter + slow drift</text>
+            </g>
+            <!-- Compass -->
+            <g transform="translate(240,0)">
+              <text class="lbl-lg ink-fill" font-weight="600" x="0" y="14">COMPASS</text>
+              <text class="lbl faint-fill" x="0" y="30">reads &#968; (heading)</text>
+              <polyline points="0,54 20,53 30,56 40,50 50,53 60,58 70,53 80,55 90,54" class="rust-stroke nofill" stroke-width="1.6"/>
+              <line x1="0" y1="54" x2="90" y2="54" class="faint-stroke" stroke-width="1" stroke-dasharray="2 3"/>
+              <text class="lbl faint-fill" x="0" y="72">jitter + slow drift</text>
+            </g>
+            <!-- Gyro -->
+            <g transform="translate(450,0)">
+              <text class="lbl-lg ink-fill" font-weight="600" x="0" y="14">RATE GYRO</text>
+              <text class="lbl faint-fill" x="0" y="30">reads r (turn rate)</text>
+              <polyline points="0,54 20,55 30,52 40,55 50,54 60,53 70,56 80,54 90,55" class="rust-stroke nofill" stroke-width="1.6"/>
+              <line x1="0" y1="54" x2="90" y2="54" class="faint-stroke" stroke-width="1" stroke-dasharray="2 3"/>
+              <text class="lbl faint-fill" x="0" y="72">mostly clean</text>
+            </g>
+            <!-- IMU -->
+            <g transform="translate(660,0)">
+              <text class="lbl-lg ink-fill" font-weight="600" x="0" y="14">IMU ACCEL</text>
+              <text class="lbl faint-fill" x="0" y="30">reads a<tspan baseline-shift="sub" font-size="8">x</tspan>, a<tspan baseline-shift="sub" font-size="8">y</tspan></text>
+              <polyline points="0,58 20,50 30,48 40,52 50,44 60,48 70,42 80,46 90,40" class="rust-stroke nofill" stroke-width="1.6"/>
+              <line x1="0" y1="54" x2="90" y2="54" class="faint-stroke" stroke-width="1" stroke-dasharray="2 3"/>
+              <text class="lbl faint-fill" x="0" y="76">zero-point drifts too</text>
+            </g>
+          </g>
+        </svg>
+      </div>
+      <figcaption><b>What's actually aboard.</b> Four instruments, each noisy in its own way &mdash; and none of them reads the boat's speed through the water, or the current pushing on it. Both have to be worked out sideways, from what they do to everything else.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<div class="wrap">
+
+<section id="s01">
+  <div class="prose">
+    <div class="kicker"><span class="num">01</span> Instruments</div>
+    <h2>Four instruments, two blind spots</h2>
+    <p>Picture a small unmanned boat holding a course. It carries a GPS receiver, a compass, a rate gyro, and an accelerometer &mdash; a fairly ordinary sensor suite. Each one has a flaw, and the flaws are the whole plot.</p>
+    <p>The GPS doesn't report your exact position, it reports a position <em>near</em> it &mdash; jittering sample to sample, and on top of that jitter, quietly wandering off in one direction for a while before wandering back, the way a shadow drifts through a courtyard over an afternoon. The compass does the same to heading. The accelerometer is the strangest of the four: it doesn't just add noise to the acceleration it measures, it reads from a zero-point that has physically shifted from true zero &mdash; a real electrical offset baked into the chip &mdash; and that offset itself drifts, slowly, over minutes.</p>
+    <p>None of that is unusual for real hardware. What matters here is what's <em>missing</em>. Nothing on this list reads the boat's own speed &mdash; how fast it's actually moving through the water. And nothing at all reads the current: the slow, steady push of moving water that isn't the boat's doing, that no compass or accelerometer is built to notice, but that silently steers the boat off its intended track all the same.</p>
+    <p>Both of those &mdash; the boat's true speed, and the current pushing on it &mdash; are things this project needs to know well. Neither is on the instrument list. They have to be figured out from the four signals that <em>are</em>, and figured out well enough to hand back to the autopilot every tenth of a second. That's the job an Unscented Kalman Filter (a UKF) does here, and the rest of this note builds up, from nothing, exactly how.</p>
+  </div>
+</section>
+
+<section id="s02">
+  <div class="prose">
+    <div class="kicker"><span class="num">02</span> Belief</div>
+    <h2>A belief you can draw</h2>
+    <p>Start with the simplest possible version of the problem: you want to know one number &mdash; say, the boat's speed &mdash; and you have two sources of information about it that each come with some uncertainty. Maybe you had an estimate from a moment ago, aged forward a little (your <em>prior belief</em>). Maybe a sensor just reported a new reading (your <em>measurement</em>). Neither is exact. How do you combine them?</p>
+    <p>A Kalman filter's answer starts with a shift in what you're willing to call "an estimate." Instead of a single number, it carries a whole little bell curve &mdash; a most-likely value (the mean) and a width around it (how sure it is). A wide bell curve is a shrug; a narrow one is confidence.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <svg viewBox="0 0 700 300" role="img" aria-label="Three bell curves on one axis: a wide prior belief curve, a narrower measurement curve offset to the right, and a posterior curve narrower than either, sitting between them but closer to the more confident one.">
+        <line x1="40" y1="248" x2="660" y2="248" class="line-stroke" stroke-width="1.2"/>
+        <!-- prior -->
+        <path d="M170 248 C210 248 234 128 300 128 C366 128 390 248 430 248 Z" class="nofill soft-stroke" stroke-width="1.8" stroke-dasharray="3 4"/>
+        <!-- measurement -->
+        <path d="M340 248 C368 248 386 88 434 88 C482 88 500 248 528 248 Z" class="rust-wash rust-stroke" stroke-width="1.8"/>
+        <!-- posterior -->
+        <path d="M368 248 C390 248 402 46 410 46 M410 46 C418 46 430 248 452 248 Z" class="nofill" opacity="0"/>
+        <path d="M366 248 C386 248 388 46 410 46 C432 46 434 248 454 248 Z" class="teal-wash teal-stroke" stroke-width="2.2"/>
+
+        <text x="300" y="270" text-anchor="middle" class="lbl-lg soft-fill">prior belief</text>
+        <text x="300" y="288" text-anchor="middle" class="lbl faint-fill">wide &mdash; aged since last look</text>
+
+        <text x="484" y="270" text-anchor="middle" class="lbl-lg rust-fill">new measurement</text>
+        <text x="484" y="288" text-anchor="middle" class="lbl faint-fill">narrower &mdash; a fresh sensor reading</text>
+
+        <text x="410" y="34" text-anchor="middle" class="lbl-lg teal-fill" font-weight="600">posterior belief</text>
+        <text x="410" y="288" text-anchor="middle" class="lbl teal-fill">narrower than either input</text>
+      </svg>
+    </div>
+    <figcaption><b>Two guesses combine into a better one.</b> Multiply a wide prior by a narrower measurement and the result is narrower than both &mdash; and pulled toward whichever one was more confident. This is the whole engine of a Kalman filter, run once per sensor reading.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>That's the update in one dimension. In two or more dimensions the same bell curve becomes an ellipse &mdash; a cloud with a shape, not just a width, because uncertainty in one direction is often tangled up with uncertainty in another. A single GPS fix, for instance, tells you a lot about where you are along the line the fix constrains, and comparatively little about your position along that line &mdash; so the cloud narrows sharply in one direction and barely at all in the other.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <div class="fig-pair">
+        <div>
+          <svg viewBox="0 0 320 300" role="img" aria-label="Before a measurement: a wide uncertainty ellipse, with a dashed band showing what a new GPS reading would rule in.">
+            <g transform="translate(160,150)">
+              <ellipse rx="108" ry="66" transform="rotate(-18)" class="teal-wash soft-stroke" stroke-width="1.4"/>
+              <g transform="rotate(24)">
+                <line x1="-160" y1="-30" x2="160" y2="-30" class="rust-stroke" stroke-width="1.6" stroke-dasharray="5 4"/>
+                <line x1="-160" y1="24" x2="160" y2="24" class="rust-stroke" stroke-width="1.6" stroke-dasharray="5 4"/>
+              </g>
+              <circle r="3.5" class="ink-fill"/>
+            </g>
+            <text x="160" y="272" text-anchor="middle" class="lbl-lg soft-fill">before</text>
+            <text x="160" y="290" text-anchor="middle" class="lbl faint-fill">wide belief, band = new fix arriving</text>
+          </svg>
+        </div>
+        <div>
+          <svg viewBox="0 0 320 300" role="img" aria-label="After the measurement: a much narrower uncertainty ellipse, shifted to where the prior cloud and the measurement band overlapped most, elongated only along the direction the measurement did not constrain.">
+            <g transform="translate(150,158)">
+              <ellipse rx="58" ry="20" transform="rotate(24)" class="teal-soft-fill teal-stroke" stroke-width="2"/>
+              <circle r="3.5" class="teal-fill"/>
+            </g>
+            <text x="160" y="272" text-anchor="middle" class="lbl-lg teal-fill">after</text>
+            <text x="160" y="290" text-anchor="middle" class="lbl faint-fill">tight along the band, still loose across it</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+    <figcaption><b>The cloud narrows unevenly.</b> A measurement squeezes belief hardest in the direction it actually constrains, and leaves the rest almost untouched &mdash; the new cloud is smaller, but not smaller in every direction equally. Hold onto this: §06 turns on exactly this unevenness.</figcaption>
+  </figure>
+</section>
+
+<section id="s03">
+  <div class="prose">
+    <div class="kicker"><span class="num">03</span> The bend</div>
+    <h2>When the world bends</h2>
+    <p>All of that works cleanly when the relationship between what you're estimating and what you observe is a straight line &mdash; push a bell-curve cloud through a straight-line function and you get another clean bell-curve cloud out, no drama. A plain Kalman filter only knows how to do that one trick, so it only works where the world genuinely is that simple.</p>
+    <p>This boat's dynamics aren't. The hydrodynamic force on the hull &mdash; the drag, the lift off the rudder, the thrust from the propeller &mdash; climbs with relative velocity in a curve, not a straight line: double the speed and the force does not simply double. That's ordinary fluid dynamics, and it means the function connecting "the boat's state right now" to "the boat's state a tenth of a second from now" is a genuinely bent one.</p>
+    <p>The classic fix, used by the Extended Kalman Filter (EKF), is to <em>linearize</em>: at today's estimate, draw the straight tangent line that just touches the real curve, and use that line's slope as a stand-in for the whole function. Close to the point you drew it at, the tangent and the curve agree closely. Get an uncertainty cloud with any real width, though, and its outer edges sit further from that point &mdash; and the further out you go, the more the straight-line stand-in and the real curve disagree.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <svg viewBox="0 0 680 340" role="img" aria-label="A curved force-versus-velocity function with a straight tangent line drawn at one point. Sample points spread away from that point show the real curve and the tangent line diverging more and more the further away they are.">
+        <line x1="50" y1="290" x2="630" y2="290" class="line-stroke" stroke-width="1.2"/>
+        <line x1="50" y1="290" x2="50" y2="40" class="line-stroke" stroke-width="1.2"/>
+        <text x="640" y="294" class="lbl faint-fill">relative velocity</text>
+        <text x="34" y="34" class="lbl faint-fill" text-anchor="end">force</text>
+
+        <path d="M70 274 C 200 268, 300 250, 360 190 C 420 128, 470 70, 560 54" class="nofill rust-stroke" stroke-width="2.2"/>
+        <!-- tangent at P (360,190) -->
+        <line x1="230" y1="252" x2="490" y2="128" class="soft-stroke" stroke-width="1.6" stroke-dasharray="5 4"/>
+        <circle cx="360" cy="190" r="4.5" class="ink-fill"/>
+        <text x="360" y="210" text-anchor="middle" class="lbl ink-fill">linearize here</text>
+
+        <g class="faint-stroke" stroke-width="1" stroke-dasharray="2 3">
+          <line x1="460" y1="290" x2="460" y2="98"/>
+          <line x1="540" y1="290" x2="540" y2="62"/>
+        </g>
+        <circle cx="460" cy="100" r="4" class="rust-fill"/>
+        <circle cx="460" cy="152" r="4" class="soft-fill"/>
+        <circle cx="540" cy="60" r="4" class="rust-fill"/>
+        <circle cx="540" cy="98" r="4" class="soft-fill"/>
+        <line x1="474" y1="100" x2="474" y2="152" class="faint-stroke" stroke-width="1"/>
+        <line x1="554" y1="60" x2="554" y2="98" class="faint-stroke" stroke-width="1"/>
+        <text x="478" y="128" class="lbl faint-fill">small gap</text>
+        <text x="558" y="82" class="lbl faint-fill">bigger gap</text>
+        <text x="440" y="316" text-anchor="middle" class="lbl rust-fill">&#9679; real curve</text>
+        <text x="440" y="330" text-anchor="middle" class="lbl soft-fill">&#9679; tangent-line guess</text>
+      </svg>
+    </div>
+    <figcaption><b>A straight-line stand-in only holds up locally.</b> Right at the linearization point, the tangent and the real force curve agree. A little further out &mdash; exactly where the edge of any real uncertainty cloud reaches &mdash; the tangent line and the true curve quietly disagree, and an EKF has no way to notice.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>That disagreement doesn't throw an error. The EKF just reports a mean and a spread that no longer quite match the real, bent physics &mdash; usually more confident than it has any right to be. The question the rest of this note answers is: what if you never approximate the curve at all?</p>
+  </div>
+</section>
+
+<section id="s04">
+  <div class="prose">
+    <div class="kicker"><span class="num">04</span> Sigma points</div>
+    <h2>Sample the cloud, not the function</h2>
+    <p>Here's the idea the Unscented Kalman Filter is built on, and it's a genuinely different move: instead of approximating the <em>function</em> with a tangent line, approximate the <em>cloud</em> with a small, deliberate set of sample points &mdash; then push every one of those points through the real, exact, unmodified physics, individually. No curve-flattening anywhere. The only approximation left is which finite handful of points you chose to stand in for the whole cloud, and that handful is chosen specifically to get the cloud's mean and spread exactly right going in.</p>
+    <p>These sample points are called <strong>sigma points</strong>, and the recipe for placing them is almost stubbornly simple: put one point exactly at the mean, then, for every direction of uncertainty the cloud has, place one point a calculated distance out along that direction and a mirror-image point the same distance back the other way.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <svg viewBox="0 0 640 400" role="img" aria-label="An uncertainty ellipse with five sigma points marked on it: one at the center, and two symmetric pairs placed along the ellipse's long and short axes.">
+        <g transform="translate(320,190)">
+          <ellipse rx="150" ry="86" transform="rotate(-14)" class="teal-wash soft-stroke" stroke-width="1.3"/>
+          <g transform="rotate(-14)" class="faint-stroke" stroke-width="1" stroke-dasharray="2 3">
+            <line x1="-150" y1="0" x2="150" y2="0"/>
+            <line x1="0" y1="-86" x2="0" y2="86"/>
+          </g>
+          <g transform="rotate(-14)">
+            <circle cx="150" cy="0" r="6" class="teal-fill"/>
+            <circle cx="-150" cy="0" r="6" class="teal-fill"/>
+            <circle cx="0" cy="86" r="6" class="teal-fill"/>
+            <circle cx="0" cy="-86" r="6" class="teal-fill"/>
+          </g>
+          <circle r="7" class="ink-fill"/>
+        </g>
+        <text x="320" y="106" text-anchor="middle" class="lbl-lg ink-fill" font-weight="600">&#967;&#8320; &mdash; the mean itself</text>
+        <text x="512" y="196" text-anchor="start" class="lbl teal-fill">&#967;&#8321;, &#967;&#8323; &mdash; spread along the long axis</text>
+        <text x="320" y="320" text-anchor="middle" class="lbl teal-fill">&#967;&#8322;, &#967;&#8324; &mdash; spread along the short axis</text>
+        <text x="320" y="378" text-anchor="middle" class="lbl faint-fill">in this project: 12 directions of uncertainty &rarr; 25 sigma points, same recipe</text>
+      </svg>
+    </div>
+    <figcaption><b>Sigma points sit on the cloud's own ribs.</b> One at the center, then a symmetric pair along every axis of the ellipse &mdash; not scattered randomly, but placed exactly where they need to be to reconstruct this cloud's real mean and spread. "Which axes, how far out" comes straight from the cloud's own covariance (its Cholesky factor: the ellipse's natural handles), scaled by a reach setting, &alpha;.</figcaption>
+  </figure>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <svg viewBox="0 0 640 170" role="img" aria-label="Three horizontal dials showing this project's actual alpha, beta, and kappa values: alpha very close to zero, beta at a mid-high mark, kappa at zero.">
+        <g transform="translate(0,10)">
+          <text x="60" y="14" class="lbl-lg ink-fill" font-weight="600">&alpha;</text>
+          <line x1="100" y1="10" x2="560" y2="10" class="line-stroke" stroke-width="2"/>
+          <circle cx="106" cy="10" r="6" class="teal-fill"/>
+          <text x="580" y="14" class="lbl faint-fill">reach</text>
+          <text x="100" y="30" class="lbl faint-fill">0.001 &mdash; sigma points hug the mean tightly</text>
+        </g>
+        <g transform="translate(0,68)">
+          <text x="60" y="14" class="lbl-lg ink-fill" font-weight="600">&beta;</text>
+          <line x1="100" y1="10" x2="560" y2="10" class="line-stroke" stroke-width="2"/>
+          <circle cx="330" cy="10" r="6" class="teal-fill"/>
+          <text x="580" y="14" class="lbl faint-fill">shape trust</text>
+          <text x="100" y="30" class="lbl faint-fill">2.0 &mdash; the textbook value when the input cloud is Gaussian</text>
+        </g>
+        <g transform="translate(0,126)">
+          <text x="60" y="14" class="lbl-lg ink-fill" font-weight="600">&kappa;</text>
+          <line x1="100" y1="10" x2="560" y2="10" class="line-stroke" stroke-width="2"/>
+          <circle cx="106" cy="10" r="6" class="teal-fill"/>
+          <text x="580" y="14" class="lbl faint-fill">secondary scale</text>
+          <text x="100" y="30" class="lbl faint-fill">0 &mdash; left at its usual default</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><b>Three dials, one job each.</b> &alpha; sets how far the sigma points reach from the mean &mdash; small keeps them local, which matters when the dynamics bend sharply near the current estimate. &beta; folds in a correction for the reconstructed spread, tuned to be exact when the incoming cloud is Gaussian. &kappa; is a spare scale knob, usually left alone. Together with the state count <em>n</em>, they set every sigma point's weight in the two averages that follow.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>Placing the points is only half the trick. The other half is what happens next: every single sigma point gets pushed, on its own, through the real nonlinear model &mdash; the actual curved physics, not a tangent-line stand-in for it. Some points land further from where a straight-line guess would have put them than others, because the curve bends differently in different places. That's the point.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <svg viewBox="0 0 720 380" role="img" aria-label="Five sigma points on the left, each pushed individually through the real nonlinear model, landing in a new and irregularly-shaped scatter on the right. A new ellipse is fit to that scatter, giving a new mean and covariance.">
+        <g transform="translate(120,190)">
+          <g class="faint-stroke" stroke-width="1" stroke-dasharray="2 3">
+            <ellipse rx="80" ry="46" transform="rotate(-14)" fill="none"/>
+          </g>
+          <circle cx="0" cy="0" r="6" class="teal-fill"/>
+          <circle cx="70" cy="-14" r="5" class="teal-fill"/>
+          <circle cx="-70" cy="14" r="5" class="teal-fill"/>
+          <circle cx="20" cy="42" r="5" class="teal-fill"/>
+          <circle cx="-20" cy="-42" r="5" class="teal-fill"/>
+          <text x="0" y="86" text-anchor="middle" class="lbl faint-fill">sigma points, χ</text>
+        </g>
+
+        <g transform="translate(360,190)">
+          <path d="M-70 -70 C -30 -40, 30 40, 70 70" class="nofill line-stroke" stroke-width="10" stroke-linecap="round" opacity="0.5"/>
+          <text x="0" y="-92" text-anchor="middle" class="lbl faint-fill">the exact model &mdash; no shortcuts</text>
+        </g>
+
+        <g transform="translate(600,150)">
+          <path d="M-64 30 C -20 60, 40 -10, 56 -58" class="nofill teal-stroke" stroke-width="1.6" stroke-dasharray="4 4" transform="rotate(20)"/>
+          <ellipse rx="70" ry="34" transform="rotate(24)" class="nofill teal-stroke" stroke-width="1.6" stroke-dasharray="4 4"/>
+          <circle cx="8" cy="-6" r="6" class="ink-fill"/>
+          <circle cx="14" cy="-42" r="5" class="teal-fill"/>
+          <circle cx="-40" cy="18" r="5" class="teal-fill"/>
+          <circle cx="52" cy="24" r="5" class="teal-fill"/>
+          <circle cx="-8" cy="44" r="5" class="teal-fill"/>
+          <circle cx="42" cy="-28" r="5" class="teal-fill"/>
+          <text x="8" y="-58" text-anchor="middle" class="lbl-lg ink-fill" font-weight="600">new mean</text>
+          <text x="0" y="86" text-anchor="middle" class="lbl faint-fill">reshaped scatter, refit</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><b>Push every point, then look at where they landed.</b> The five points don't keep their neat cloud shape &mdash; the real nonlinearity warps them individually. The new mean is a weighted average of where they landed (weights <code class="inline">Wm</code>); the new spread is a weighted average of how far each landing spot sits from that new mean (weights <code class="inline">Wc</code>). No tangent line was ever drawn.</figcaption>
+  </figure>
+</section>
+
+<section id="s05">
+  <div class="prose">
+    <div class="kicker"><span class="num">05</span> One cycle</div>
+    <h2>One full turn of the crank</h2>
+    <p>Put predict and correct together with sigma points doing the work, on a toy version of this exact problem: two unknowns, your own speed <code class="inline">u</code> and the current <code class="inline">c</code> pushing on you, and one noisy accelerometer reading that depends on <em>both</em> together (only the combined, water-relative motion produces force).</p>
+    <h3>Predict</h3>
+    <p>Take the five sigma points standing in for today's belief about <code class="inline">[u, c]</code>, and age each one forward through the process model &mdash; roughly steady, plus a little uncertainty for what might genuinely change tick to tick. The reconstructed cloud comes out a little wider than it started: this is the "spread grows" half of the predict/correct loop from §02.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <div class="fig-pair">
+        <div>
+          <svg viewBox="0 0 300 220" role="img" aria-label="Before predicting: a small, tight cluster of five sigma points.">
+            <g transform="translate(150,110)">
+              <circle r="5.5" class="teal-fill"/>
+              <circle cx="34" cy="0" r="4.5" class="teal-fill"/>
+              <circle cx="-34" cy="0" r="4.5" class="teal-fill"/>
+              <circle cx="0" cy="22" r="4.5" class="teal-fill"/>
+              <circle cx="0" cy="-22" r="4.5" class="teal-fill"/>
+              <ellipse rx="34" ry="22" class="nofill faint-stroke" stroke-width="1" stroke-dasharray="2 3"/>
+            </g>
+            <text x="150" y="196" text-anchor="middle" class="lbl-lg soft-fill">before predict</text>
+          </svg>
+        </div>
+        <div>
+          <svg viewBox="0 0 300 220" role="img" aria-label="After predicting: a slightly wider, shifted cluster of five sigma points.">
+            <g transform="translate(150,110)">
+              <circle r="5.5" class="teal-fill"/>
+              <circle cx="52" cy="4" r="4.5" class="teal-fill"/>
+              <circle cx="-48" cy="-4" r="4.5" class="teal-fill"/>
+              <circle cx="2" cy="34" r="4.5" class="teal-fill"/>
+              <circle cx="-2" cy="-34" r="4.5" class="teal-fill"/>
+              <ellipse rx="50" ry="34" transform="rotate(6)" class="nofill teal-stroke" stroke-width="1.4" stroke-dasharray="2 3"/>
+            </g>
+            <text x="150" y="196" text-anchor="middle" class="lbl-lg teal-fill">after predict</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+    <figcaption><b>Aging the belief forward widens it.</b> Same five points, aged through the process model &mdash; a little wider, because time passing always adds a little uncertainty (this project's <code class="inline">q_diag</code>, in §06).</figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>Correct</h3>
+    <p>Now the real accelerometer reports a number. Before comparing, ask each of the five predicted sigma points what accelerometer reading <em>it</em> would produce &mdash; run every one through the sensor model, same as the dynamics. That gives a predicted-measurement cloud alongside the state cloud, and, crucially, a picture of how the two co-vary: do points with a higher <code class="inline">u</code> and points with a higher <code class="inline">c</code> tend to produce similar predicted readings, or does only one of them really move the needle?</p>
+    <p>The gap between the actual sensor reading and the predicted-measurement cloud's mean is the <strong>innovation</strong> &mdash; literally, the new information this tick contributes. The <strong>Kalman gain</strong> is what turns that gap into an actual correction: it reads the tilt of the joint cloud and asks, "for this much of a surprise in the measurement, how much should <code class="inline">u</code> shift, and how much should <code class="inline">c</code>?"</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <svg viewBox="0 0 680 380" role="img" aria-label="A tilted ellipse showing how predicted accelerometer readings and the current estimate co-vary. A vertical dashed line marks the actual measurement, offset from the cloud's center by the innovation. A diagonal projection from that line up the tilt of the ellipse shows how much of the innovation becomes a shift in the current estimate, landing at a new posterior point.">
+        <line x1="70" y1="330" x2="620" y2="330" class="line-stroke" stroke-width="1.2"/>
+        <line x1="70" y1="330" x2="70" y2="40" class="line-stroke" stroke-width="1.2"/>
+        <text x="630" y="334" class="lbl faint-fill">predicted accelerometer reading</text>
+        <text x="54" y="34" class="lbl faint-fill" text-anchor="end">current estimate, c</text>
+
+        <g transform="translate(300,200)">
+          <ellipse rx="150" ry="58" transform="rotate(-22)" class="rust-wash soft-stroke" stroke-width="1.3"/>
+        </g>
+        <circle cx="300" cy="200" r="5" class="ink-fill" fill-opacity="0.6"/>
+        <text x="300" y="184" text-anchor="middle" class="lbl soft-fill">prior mean</text>
+
+        <line x1="418" y1="330" x2="418" y2="70" class="rust-stroke" stroke-width="1.6" stroke-dasharray="5 4"/>
+        <text x="418" y="58" text-anchor="middle" class="lbl rust-fill">actual reading</text>
+
+        <line x1="300" y1="352" x2="418" y2="352" class="ink-stroke" stroke-width="1.4" marker-end="url(#arrIn)" marker-start="url(#arrInS)"/>
+        <text x="359" y="368" text-anchor="middle" class="lbl ink-fill">innovation</text>
+
+        <line x1="418" y1="238" x2="366" y2="146" class="teal-stroke" stroke-width="1.8" stroke-dasharray="3 3"/>
+        <circle cx="366" cy="146" r="6" class="teal-fill"/>
+        <text x="372" y="132" class="lbl teal-fill" font-weight="600">posterior mean</text>
+        <text x="440" y="200" class="lbl faint-fill" transform="rotate(-22 418 238)">Kalman gain &mdash; the tilt</text>
+
+        <defs>
+          <marker id="arrIn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 Z" class="ink-fill"/></marker>
+          <marker id="arrInS" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M10 0 L0 5 L10 10 Z" class="ink-fill"/></marker>
+        </defs>
+      </svg>
+    </div>
+    <figcaption><b>The gain is the cloud's own tilt.</b> How far off the actual reading was from expected (the innovation) is only half the story &mdash; the tilt of the joint cloud says how much of that surprise belongs to <code class="inline">c</code> versus <code class="inline">u</code>. A cloud tilted steeply toward <code class="inline">c</code> hands most of the correction to the current estimate; a flat cloud barely moves it at all. This tilt <em>is</em> the Kalman gain.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>Blend prior and gain-weighted innovation, and the posterior lands where the diagram shows it &mdash; shifted, and narrower than the prior, because a real measurement just arrived. Run this predict-correct pair once every tick, forever, and that's the entire filter. Everything from here is what changes when you scale it up to twelve unknowns and six real sensors.</p>
+  </div>
+</section>
+
+<section id="s06">
+  <div class="prose">
+    <div class="kicker"><span class="num">06</span> This project</div>
+    <h2>Aboard this project</h2>
+    <p>The toy carried two unknowns. The filter actually running here (<code class="inline">ukf/ukf_core.py</code>) carries twelve, and every one of the extra six exists for a specific, load-bearing reason.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="manifest">
+      <div class="manifest-group">
+        <h4>Motion &mdash; the obvious six</h4>
+        <div class="manifest-row"><span class="sym">u, v</span><span class="desc">surge and sway speed through the water &mdash; never directly sensed</span></div>
+        <div class="manifest-row"><span class="sym">r</span><span class="desc">yaw rate &mdash; the one state the gyro reads almost directly</span></div>
+        <div class="manifest-row"><span class="sym">x, y, &#968;</span><span class="desc">position and heading &mdash; noisy but directly sensed, by GPS and compass</span></div>
+      </div>
+      <div class="manifest-group">
+        <h4>The current &mdash; augmented because it isn't an input, it's an unknown</h4>
+        <div class="manifest-row"><span class="sym">v<sub>cx</sub>, v<sub>cy</sub></span><span class="desc">earth-frame current &mdash; treating it as a known constant would be wrong; it has to be tracked and corrected, like everything else</span></div>
+      </div>
+      <div class="manifest-group">
+        <h4>Sensor drift &mdash; augmented to stop misattribution</h4>
+        <div class="manifest-row"><span class="sym">a<sub>x</sub>_bias, a<sub>y</sub>_bias</span><span class="desc">the IMU's own slowly-drifting zero-offset, tracked separately from real acceleration</span></div>
+        <div class="manifest-row"><span class="sym">pos_bias_x, pos_bias_y</span><span class="desc">the GPS's own slowly-drifting bias, tracked separately from real position</span></div>
+      </div>
+    </div>
+  </figure>
+
+  <div class="prose">
+    <p>The reasoning behind that last group is the sharpest idea in the whole project, and it's worth sitting with. If the filter has exactly one channel of evidence for some hidden quantity, and that channel has an unmodeled error riding along with it, the filter cannot tell the real signal apart from the error &mdash; it has nothing else to compare against. Whatever the error looks like gets absorbed into the hidden quantity almost whole.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <div class="fig-pair">
+        <div>
+          <svg viewBox="0 0 320 240" role="img" aria-label="Before: one accelerometer reading pointing at a single question mark, unable to distinguish real current push from the sensor's own drifting offset.">
+            <text x="160" y="30" text-anchor="middle" class="lbl-lg ink-fill" font-weight="600">one channel</text>
+            <line x1="160" y1="46" x2="160" y2="90" class="ink-stroke" stroke-width="1.6" marker-end="url(#arrDn)"/>
+            <circle cx="160" cy="120" r="26" class="nofill soft-stroke" stroke-width="1.6" stroke-dasharray="3 3"/>
+            <text x="160" y="127" text-anchor="middle" class="lbl-lg soft-fill">?</text>
+            <text x="60" y="200" text-anchor="middle" class="lbl gold-fill">real current push</text>
+            <text x="260" y="200" text-anchor="middle" class="lbl rust-fill">sensor's own drift</text>
+            <line x1="90" y1="188" x2="140" y2="140" class="faint-stroke" stroke-width="1" stroke-dasharray="2 3"/>
+            <line x1="230" y1="188" x2="180" y2="140" class="faint-stroke" stroke-width="1" stroke-dasharray="2 3"/>
+            <text x="160" y="228" text-anchor="middle" class="lbl faint-fill">indistinguishable from one signal alone</text>
+          </svg>
+        </div>
+        <div>
+          <svg viewBox="0 0 320 240" role="img" aria-label="After: the sensor's drift is tracked as its own separate state, freeing the current estimate to hold only the real signal.">
+            <text x="160" y="30" text-anchor="middle" class="lbl-lg ink-fill" font-weight="600">bias tracked separately</text>
+            <line x1="160" y1="46" x2="160" y2="80" class="ink-stroke" stroke-width="1.6"/>
+            <line x1="160" y1="80" x2="90" y2="130" class="gold-stroke" stroke-width="1.6" marker-end="url(#arrGoldSm)"/>
+            <line x1="160" y1="80" x2="230" y2="130" class="rust-stroke" stroke-width="1.6" marker-end="url(#arrRustSm)"/>
+            <circle cx="90" cy="150" r="22" class="gold-wash gold-stroke" stroke-width="1.6"/>
+            <text x="90" y="156" text-anchor="middle" class="lbl gold-fill" font-weight="600">v<tspan baseline-shift="sub" font-size="8">cx</tspan></text>
+            <circle cx="230" cy="150" r="22" class="rust-wash rust-stroke" stroke-width="1.6"/>
+            <text x="230" y="156" text-anchor="middle" class="lbl rust-fill" font-weight="600">a<tspan baseline-shift="sub" font-size="8">x</tspan>_bias</text>
+            <text x="160" y="228" text-anchor="middle" class="lbl faint-fill">two states, each free to hold its own signal</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+    <figcaption><b>Give the drift somewhere else to go.</b> Add the sensor's own bias as a tracked state &mdash; with dynamics matched to how that real bias actually wanders &mdash; and the current estimate is no longer forced to explain both the real push <em>and</em> the sensor's flaw at once.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>That's the design. What follows is what happened when three of the numbers behind it were wrong &mdash; found and fixed in this project, in this order.</p>
+
+    <h3>Bug one: a process-noise budget 7,147&times; too generous</h3>
+    <p>Every predict step, the filter is told how much the current is <em>allowed</em> to have genuinely changed since last tick &mdash; a process-noise setting, <code class="inline">q_diag</code>. That number had been computed from a stale copy of the current model's own drift rate, then compounded by an earlier automated retuning pass, and came out roughly 7,147&times; the physically correct value. Told it could wander a hundred times faster than the real current ever does, the filter did exactly that &mdash; not because anything was noisy in the world, but because its own rulebook said wandering was allowed.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <div class="fig-pair">
+        <div>
+          <svg viewBox="0 0 320 240" role="img" aria-label="Before the fix: the true current sits flat near 0.1 meters per second, while the filter's estimate wanders wildly between about 0.01 and 0.12.">
+            <line x1="20" y1="210" x2="300" y2="210" class="line-stroke" stroke-width="1"/>
+            <line x1="20" y1="210" x2="20" y2="30" class="line-stroke" stroke-width="1"/>
+            <text x="12" y="60" text-anchor="end" class="lbl faint-fill">0.10</text>
+            <text x="12" y="205" text-anchor="end" class="lbl faint-fill">0.00</text>
+            <line x1="20" y1="56" x2="300" y2="56" class="ink-stroke" stroke-width="2"/>
+            <polyline points="20,196 40,150 60,124 80,166 100,110 120,84 140,96 160,66 180,92 200,58 220,110 240,72 260,124 280,64 300,96" class="nofill teal-stroke" stroke-width="1.8"/>
+            <text x="160" y="230" text-anchor="middle" class="lbl-lg soft-fill">before &mdash; estimate chases noise</text>
+          </svg>
+        </div>
+        <div>
+          <svg viewBox="0 0 320 240" role="img" aria-label="After the fix: the true current stays flat near 0.1 meters per second, and the filter's estimate tracks it tightly, staying almost exactly on the true line.">
+            <line x1="20" y1="210" x2="300" y2="210" class="line-stroke" stroke-width="1"/>
+            <line x1="20" y1="210" x2="20" y2="30" class="line-stroke" stroke-width="1"/>
+            <text x="12" y="60" text-anchor="end" class="lbl faint-fill">0.10</text>
+            <text x="12" y="205" text-anchor="end" class="lbl faint-fill">0.00</text>
+            <line x1="20" y1="56" x2="300" y2="56" class="ink-stroke" stroke-width="2"/>
+            <polyline points="20,58 40,57 60,58 80,56 100,57 120,55 140,58 160,56 180,54 200,57 220,55 240,58 260,56 280,55 300,57" class="nofill teal-stroke" stroke-width="1.8"/>
+            <text x="160" y="230" text-anchor="middle" class="lbl-lg teal-fill">after &mdash; estimate hugs the truth</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+    <figcaption><span class="legend"><span><i class="true"></i>true current</span><span><i class="estimate"></i>UKF estimate</span></span>Same true current, same sensor noise &mdash; only the process-noise budget changed. A filter told it's allowed to wander will wander, whether or not there's anything real to explain.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>Bug two: confident, but confidently wrong</h3>
+    <p>The obvious next step &mdash; correct that number, and while at it, tighten the filter's opening assumption about the current too &mdash; backfired the first time it was tried. The filter had always been seeded believing the current started at exactly zero. That's a reasonable, humble assumption when the filter is also willing to admit it might be very wrong (a wide opening cloud). Make it confident <em>and</em> keep the wrong starting guess, though, and the filter now believes strongly in something false &mdash; and takes far longer to talk itself out of it than a wider, humbler guess ever would have.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <div class="fig-pair">
+        <div>
+          <svg viewBox="0 0 320 200" role="img" aria-label="Seeded at zero: a tight belief sitting at zero on a number line, far from the true value marked at 0.1, needing a long slow crawl to get there.">
+            <line x1="30" y1="140" x2="290" y2="140" class="line-stroke" stroke-width="1.2"/>
+            <line x1="50" y1="132" x2="50" y2="148" class="faint-stroke" stroke-width="1"/>
+            <text x="50" y="164" text-anchor="middle" class="lbl faint-fill">0</text>
+            <line x1="250" y1="132" x2="250" y2="148" class="ink-stroke" stroke-width="1.4"/>
+            <text x="250" y="164" text-anchor="middle" class="lbl ink-fill">true: 0.1</text>
+            <ellipse cx="50" cy="140" rx="14" ry="10" class="teal-soft-fill teal-stroke" stroke-width="1.6"/>
+            <line x1="66" y1="140" x2="234" y2="140" class="faint-stroke" stroke-width="1.4" stroke-dasharray="4 4" marker-end="url(#arrFaint)"/>
+            <text x="150" y="120" text-anchor="middle" class="lbl faint-fill">long, slow crawl</text>
+            <text x="160" y="26" text-anchor="middle" class="lbl-lg soft-fill">seeded at zero, tight prior</text>
+          </svg>
+        </div>
+        <div>
+          <svg viewBox="0 0 320 200" role="img" aria-label="Seeded at the configured mean: a tight belief already sitting right on the true value, no crawl needed.">
+            <line x1="30" y1="140" x2="290" y2="140" class="line-stroke" stroke-width="1.2"/>
+            <line x1="250" y1="132" x2="250" y2="148" class="ink-stroke" stroke-width="1.4"/>
+            <text x="250" y="164" text-anchor="middle" class="lbl ink-fill">true: 0.1</text>
+            <ellipse cx="250" cy="140" rx="14" ry="10" class="teal-soft-fill teal-stroke" stroke-width="1.6"/>
+            <text x="160" y="26" text-anchor="middle" class="lbl-lg teal-fill">seeded at the current's own mean</text>
+            <text x="160" y="182" text-anchor="middle" class="lbl faint-fill">right where it needs to be, from tick one</text>
+          </svg>
+        </div>
+      </div>
+    </div>
+    <figcaption><b>Confidence is only good news if it's confidence in the right place.</b> The fix wasn't to loosen the prior back up &mdash; it was to seed the filter at the current's own configured average speed instead of always zero, so a tight, confident opening guess is also a correct one.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <h3>Bug three: going straight is close to the worst case</h3>
+    <p>One more wrinkle, straight out of §05's Kalman-gain picture. The accelerometer only ever senses <em>relative</em> motion &mdash; water-relative velocity &mdash; which is the boat's own speed <code class="inline">u</code> minus the current pushing on it. Whenever the boat is running straight, that's the <em>only</em> combination of <code class="inline">u</code> and current the sensor can pin down. Their difference stays tightly constrained; exactly how that difference splits between "boat" and "current" individually stays almost completely open &mdash; nothing in a straight-line run tells you which one to credit.</p>
+    <p>A turn breaks the tie. Turning changes the geometry relating heading to sensed acceleration, which opens a second, differently-angled constraint &mdash; and where a tight band and a new, differently-tilted band cross, both unknowns are finally pinned down together, the same "two clues intersecting" idea from §05's gain picture, just spread across time instead of within a single tick.</p>
+  </div>
+
+  <figure class="fig-wide">
+    <div class="diagram">
+      <svg viewBox="0 0 680 640" role="img" aria-label="Two stacked plots of boat speed against current speed. Going straight: a tight diagonal band constrains only the difference between the two, crossing a wide band that leaves their individual split almost unconstrained, so the overlap is a long thin sliver. After a turn: a second, differently angled tight band appears, and its crossing with the first pins the overlap down to a small, tight patch.">
+        <g transform="translate(0,0)">
+          <text x="340" y="26" text-anchor="middle" class="lbl-lg ink-fill" font-weight="600">going straight</text>
+          <line x1="70" y1="270" x2="610" y2="270" class="line-stroke" stroke-width="1"/>
+          <line x1="70" y1="270" x2="70" y2="50" class="line-stroke" stroke-width="1"/>
+          <text x="618" y="274" class="lbl faint-fill">boat speed, u</text>
+          <text x="56" y="46" text-anchor="end" class="lbl faint-fill">current, c</text>
+
+          <g transform="translate(340,160)">
+            <rect x="-320" y="-16" width="640" height="32" transform="rotate(-32)" class="rust-wash" opacity="0.85"/>
+            <rect x="-40" y="-220" width="80" height="440" transform="rotate(-32)" class="faint-stroke nofill" stroke-width="1" stroke-dasharray="2 4"/>
+          </g>
+          <text x="150" y="90" class="lbl rust-fill">tight: u &minus; c is pinned</text>
+          <text x="470" y="230" class="lbl faint-fill">loose: which of u, c is unclear</text>
+        </g>
+
+        <g transform="translate(0,340)">
+          <text x="340" y="26" text-anchor="middle" class="lbl-lg teal-fill" font-weight="600">after a turn</text>
+          <line x1="70" y1="270" x2="610" y2="270" class="line-stroke" stroke-width="1"/>
+          <line x1="70" y1="270" x2="70" y2="50" class="line-stroke" stroke-width="1"/>
+          <text x="618" y="274" class="lbl faint-fill">boat speed, u</text>
+          <text x="56" y="46" text-anchor="end" class="lbl faint-fill">current, c</text>
+
+          <g transform="translate(340,160)">
+            <rect x="-320" y="-16" width="640" height="32" transform="rotate(-32)" class="rust-wash" opacity="0.85"/>
+            <rect x="-320" y="-16" width="640" height="32" transform="rotate(22)" class="teal-soft-fill" opacity="0.9"/>
+          </g>
+          <circle cx="340" cy="160" r="10" class="teal-fill"/>
+          <text x="360" y="140" class="lbl-lg teal-fill" font-weight="600">both pinned down</text>
+        </g>
+      </svg>
+    </div>
+    <figcaption><b>Two bands, one crossing.</b> Fixed in this project by pre-settling the test scenario's true starting speed to its exact equilibrium instead of guessing an inconsistent one &mdash; removing a needless straight-line stretch right at the start, the single worst moment for this ambiguity to strike.</figcaption>
+  </figure>
+
+  <div class="prose">
+    <p>One more deliberate choice belongs here. This project also runs an automated search that retunes several of the filter's noise settings by checking statistical self-consistency (a metric called NEES) against many random seeds. That search now leaves the current states alone entirely &mdash; on purpose. NEES only checks whether the filter's <em>reported</em> uncertainty matches its actual error; it cannot tell a genuinely uncertain estimate from an inflated one hiding a mistake. That is precisely how the 7,147&times; bug got there in the first place. So the current states keep their physically-derived numbers, full stop, regardless of what the automated search finds for everything else.</p>
+  </div>
+
+  <h3>Where it landed</h3>
+  <figure class="fig-wide">
+    <div class="stats">
+      <div class="stat">
+        <div class="label">v<sub>cx</sub> error (RMSE)</div>
+        <div class="num-row"><span class="before">0.0193 m/s</span><span class="arrow">&rarr;</span><span class="after">0.00022 m/s</span></div>
+        <div class="mult">~88&times; tighter</div>
+        <div class="barchart"><div class="b" style="height:32px"></div><div class="b after" style="height:1px"></div></div>
+      </div>
+      <div class="stat">
+        <div class="label">v<sub>cy</sub> error (RMSE)</div>
+        <div class="num-row"><span class="before">0.0102 m/s</span><span class="arrow">&rarr;</span><span class="after">0.00048 m/s</span></div>
+        <div class="mult">~21&times; tighter</div>
+        <div class="barchart"><div class="b" style="height:32px"></div><div class="b after" style="height:2px"></div></div>
+      </div>
+    </div>
+  </figure>
+  <div class="prose">
+    <p>Both against a true current sitting near 0.1 m/s and 0.0 m/s respectively &mdash; the filter now tracks a signal that size to well under a millimetre per second, tick after tick, for the length of the run.</p>
+  </div>
+</section>
+
+<section id="gloss">
+  <div class="prose">
+    <div class="kicker"><span class="num">&sect;</span> Appendix</div>
+    <h2>Field glossary</h2>
+    <p>The same ideas, under the names they go by in <code class="inline">ukf/ukf_core.py</code> and <code class="inline">ukf/config.py</code>.</p>
+  </div>
+  <dl class="gloss">
+    <dt>sigma point</dt><dd>One of the 25 sample points standing in for the 12-dimensional belief cloud each tick &mdash; built and propagated inside <code>predict()</code>, held in the array <code>X</code>/<code>Y</code>.</dd>
+    <dt>&alpha;, &beta;, &kappa;</dt><dd>The three shaping dials from §04 &mdash; <code>UKFConfig.alpha/beta/kappa</code>, set to 0.001 / 2.0 / 0.0.</dd>
+    <dt>process noise, Q</dt><dd>How much each state is allowed to have genuinely changed since last tick &mdash; <code>q_diag</code>. The bug in §06 was this number, ~7,147&times; too large for the current states.</dd>
+    <dt>measurement noise, R</dt><dd>How much to trust a given sensor reading &mdash; <code>r_diag</code>, sized from the sensor's real datasheet.</dd>
+    <dt>innovation</dt><dd>Actual sensor reading minus the predicted-measurement mean &mdash; computed each tick in <code>correct()</code> as <code>innovation</code>.</dd>
+    <dt>Kalman gain, K</dt><dd>The tilt of the joint state/measurement cloud, turning an innovation into a state correction &mdash; <code>K</code> in <code>correct()</code>, built from the cross-covariance <code>Pxz</code> and <code>Pzz</code>.</dd>
+    <dt>P<sub>0</sub></dt><dd>The opening belief's spread, before any measurement &mdash; <code>p0_diag</code>. Tightening this for the current states only helped once the seed (below) was also fixed.</dd>
+    <dt>seed</dt><dd>The opening mean itself &mdash; set in <code>ukf_node.py</code>'s <code>_seed()</code>, now the current's own configured average instead of always zero.</dd>
+    <dt>NEES</dt><dd>Normalized estimation error squared &mdash; a self-consistency check used by <code>tune_ukf.py</code>'s automated search, deliberately not allowed to touch the current states (§06).</dd>
+  </dl>
+</section>
+
+</div>
+</div>
+
+<footer>
+  <div class="wrap">
+    <div>ukf/ukf_core.py &middot; ukf/config.py &middot; ukf_node.py</div>
+    <div>written for this project's Unscented Kalman Filter, current-estimation state augmentation</div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  try{
+    var links = Array.prototype.slice.call(document.querySelectorAll('.railnav a'));
+    var sections = links.map(function(a){
+      var id = a.getAttribute('data-id');
+      return { a: a, el: document.getElementById(id) };
+    }).filter(function(s){ return s.el; });
+
+    if('IntersectionObserver' in window){
+      var io = new IntersectionObserver(function(entries){
+        entries.forEach(function(entry){
+          var match = sections.find(function(s){ return s.el === entry.target; });
+          if(!match) return;
+          if(entry.isIntersecting){
+            links.forEach(function(a){ a.classList.remove('active'); });
+            match.a.classList.add('active');
+          }
+        });
+      }, { rootMargin: '-40% 0px -55% 0px', threshold: 0 });
+      sections.forEach(function(s){ io.observe(s.el); });
+    }
+
+    links.forEach(function(a){
+      a.addEventListener('click', function(e){
+        var id = a.getAttribute('data-id');
+        var el = document.getElementById(id);
+        if(el){
+          e.preventDefault();
+          el.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+        }
+      });
+    });
+  }catch(e){}
+})();
+</script>
+
+<!-- shared arrow markers used across figures -->
+<svg width="0" height="0" style="position:absolute">
+  <defs>
+    <marker id="arrFaint" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" class="faint-fill"/>
+    </marker>
+    <marker id="arrGoldSm" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" class="gold-fill"/>
+    </marker>
+    <marker id="arrRustSm" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 Z" class="rust-fill"/>
+    </marker>
+    <marker id="arrDn" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0 0 L10 5 L0 10 Z" class="ink-fill"/>
+    </marker>
+  </defs>
+</svg>
+
+
+</body>
+</html>
