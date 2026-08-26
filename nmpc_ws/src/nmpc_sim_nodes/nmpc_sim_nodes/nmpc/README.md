@@ -11,14 +11,18 @@ too slow for anything beyond one-off formulation checks).
 
 | File | Role |
 |---|---|
-| `config.py` | Single source of truth for every tunable parameter (horizon, actuator bounds, cost weights, obstacle/slack settings, solver options). Nothing is hardcoded anywhere else. |
-| `path_following.py` | Pure NumPy guidance geometry: cross-track error, course angle/error, waypoint switching, the distance-scaled speed-reference ramp, obstacle padding. Also holds `wrap180_casadi`, the one CasADi-symbolic helper this file needs for the solvers' cost functions. |
-| `state_augmentation.py` | The CasADi symbolic augmented-state ODE (`augmented_dynamics_casadi`) wrapping `casadi_mmg_solver`'s MMG dynamics with the new guidance/actuator-rate rows, plus an RK4 step and a validation harness against the raw MMG model. |
-| `nmpc_acados.py` | `AcadosNMPC`, the formulation compiled to a real-time SQP-RTI OCP via acados. The only solver `nmpc_node` builds. |
-| `test_nmpc.py` | Closed-loop validation harness (plant + solver, no obstacles) — 4 scenarios, results plotted to `results/`. |
-| `run_live.py` | Same rollouts as above, but streamed live into `mpc_visualization/`'s dashboard instead of saved as static plots. |
-| `compare_qu.py` | Ad-hoc diagnostic script comparing `Q[u]=0` vs the tuned weight. |
-| `results/` | Output plots from `test_nmpc.py`. |
+| `config.py` | `NMPCConfig` dataclass and its `DEFAULT_CONFIG` instance -- single source of truth for every tunable parameter (horizon, actuator bounds, cost weights, obstacle/slack settings, solver options). Nothing is hardcoded anywhere else. |
+| `params.py` | Resolves `sim_params.yaml`'s `nmpc_node`/`map_node` ROS2 parameters into an `NMPCConfig` (`nmpc_node.py`'s own `_declare_and_build_config()` reads the same fields as ROS2 parameters instead, so this and that stay in sync by construction, not by convention). |
+| `path_following.py` | Pure NumPy guidance geometry: cross-track error, course angle/error, waypoint switching (`select_active_waypoint`, `compute_path_angle`), the distance-scaled speed-reference ramp (`compute_effective_u_ref`), obstacle padding (`pad_obstacles`). Also holds `wrap180_casadi`, the one CasADi-symbolic helper this file needs for the solvers' cost functions. |
+| `state_augmentation.py` | The CasADi symbolic augmented-state ODE (`augmented_dynamics_casadi`) wrapping `casadi_mmg_solver`'s MMG dynamics with the new guidance/actuator-rate rows, plus an RK4 step and a validation harness against the raw MMG model. Current (`vcx, vcy`) is threaded straight through into the MMG sub-block here -- see [Current-awareness](#current-awareness-in-the-ocp-model) below. |
+| `nmpc_acados.py` | `AcadosNMPC`, the formulation compiled to a real-time SQP-RTI OCP via acados -- the only solver `nmpc_node` builds (a CasADi/IPOPT debug backend, `nmpc_casadi.py`, existed early on for formulation debugging but was removed once SQP-RTI was validated -- too slow for anything beyond one-off checks). |
+
+Closed-loop test harnesses that exercise this package now live one level up,
+in `nmpc_sim_nodes/tests/` (`test_nmpc.py`, `test_closed_loop_noise.py`,
+`test_closed_loop_env.py`) -- see the top-level README's executables table --
+not inside this directory. `run_live.py`/`compare_qu.py` (an early live-viz
+runner and an ad-hoc `Q[u]` diagnostic script) predate the ROS2 restructuring
+and no longer exist; `viz_node`/`rviz_node`/`hud_node` are their replacements.
 
 ## The augmented state
 
@@ -57,6 +61,36 @@ row's own residual isn't separately wrapped in the cost.
 - **Actuator bounds**: rudder angle/rate and propeller speed/rate, applied as
   state/control bounds.
 
+## Current-awareness in the OCP model
+
+The OCP's runtime parameter vector is `p = [chi_p, x_d, y_d, vcx, vcy,
+obstacle slots...]` (`nmpc_acados.py`'s `_param_vector`/`build_acados_ocp`).
+`vcx, vcy` (earth-frame current) feed directly into
+`augmented_dynamics_casadi`'s call to `MMG_Time_Derivative_casadi`, so the
+solver's own predicted dynamics-continuity constraint reflects the same
+current-aware physics `mmg_node`'s plant integrator uses — not still water.
+`AcadosNMPC.solve(..., current=(vcx, vcy))` sets this once per call and holds
+it fixed across the whole horizon (a frozen-disturbance approximation, since
+only a single online estimate exists, not a horizon-length forecast).
+`current` defaults to `(0.0, 0.0)` if the caller doesn't pass it.
+
+**Who actually passes a real value**: `nmpc_node.py`'s `/nmpc/solve` handler
+reads `request.current` (a `CurrentState` field on `SolveNMPC.Request`) and
+forwards it straight through. `mmg_node.py` populates that field from
+`ukf_response.estimated_current` whenever `use_ukf=True` (falling back to the
+true `/env/current_state` reading otherwise) — so in the live ROS graph this
+is wired end-to-end already. Wave has no equivalent parameter anywhere in
+this model and is never seen by the OCP at all.
+
+**Why this matters, concretely**: an acados closed-loop rollout with a real
+current active in the plant but this parameter left at its `(0,0)` default
+(a plant/solver dynamics mismatch, not a tuning issue) fails its QP solver
+on almost every tick and can time out never reaching its goal, even at a
+fairly modest current speed — confirmed via `nmpc_sim_nodes/tests/test_closed_loop_noise.py`
+(see its own module docstring). Wave-only disturbance with no current active
+does not cause this; only current does, since only current has a channel
+into the OCP's own dynamics that can go missing.
+
 ## Bugs found and fixed along the way
 
 These are recorded here because they're the kind of thing that will bite
@@ -90,6 +124,19 @@ again if the formulation is ever touched without this context:
    never dips below the radius again. Fixed with an along-track "gate
    crossing" test in `select_active_waypoint`, OR'd with the original radius
    check. See the regression test at the bottom of `path_following.py`.
+5b. **Follow-up: the same gate test had no cross-track bound.** Once the
+   along-track gate above existed, it accepted *any* lateral offset once the
+   ship was past a waypoint's along-track position — fine for a wide turning
+   transient (which stays close to the line by construction), but a real bug
+   for an obstacle-avoidance detour: this project's obstacles have radii up
+   to ~6m, well past `WP_RADIUS`'s default 2m, so a detour swinging that far
+   off the line could cross the gate plane nowhere near the actual waypoint
+   and get counted as "reached" (observed live: the active-waypoint marker
+   jumping straight to the final endpoint while the ship was still visibly
+   nowhere near the intermediate one). Fixed by also requiring the
+   perpendicular/cross-track offset at the gate-crossing point to be within
+   `wp_radius`, leaving the original fix's own case (small cross-track
+   offset by construction) unaffected.
 6. **No braking near a target.** `Q[x]`/`Q[y]` (position error, meters²)
    dwarfs `Q[u]` (speed error, (m/s)²) at any real distance, so a constant
    speed reference never gets "discovered" as needing to shrink — the ship
@@ -98,24 +145,23 @@ again if the formulation is ever touched without this context:
    shrinking the *speed reference itself* with distance
    (`compute_effective_u_ref`, a linear ramp inside `config.BRAKE_DISTANCE`),
    rather than relying on the cost weights to find braking on their own.
-
-## Known open issue
-
-Under a low-speed pivot maneuver (e.g. correcting heavily near a target with
-the braking ramp active), `u` and `v` can both approach zero simultaneously.
-`casadi_mmg_solver`'s `u_val = ca.fmax(u, 1e-5)` floor only guards the
-propeller/rudder terms — it does **not** prevent the resultant speed
-`U = sqrt(u_val^2 + v^2)` itself from collapsing, and `r_ndm = r*Lpp/U` (used
-throughout the hull force terms) blows up for any nonzero yaw rate as `U→0`.
-This has been observed to make Acados' SQP-RTI QP solver fail outright during
-a live run, and because SQP-RTI's warm-started iterate persists across calls,
-a single poisoned solve can freeze the controller permanently rather than
-recovering on the next step. A hard lower bound on `u` (e.g. via `idxbx`/
-`lbx` in this project's own OCP, not touching the read-only MMG model) has
-been identified as the fix but is not yet implemented — `U_REF_MIN=0.05` in
-`config.py` is deliberately kept just above zero specifically to steer clear
-of this, but nothing currently makes it a hard constraint the optimizer must
-respect.
+7. **Acados QP failures during a low-speed pivot (`U→0` singularity).**
+   Under a low-speed pivot maneuver (e.g. correcting heavily near a target
+   with the braking ramp active), `u` and `v` can both approach zero
+   simultaneously. `casadi_mmg_solver`'s `u_val = ca.fmax(u, 1e-5)` floor
+   only guards the propeller/rudder terms — it does **not** prevent the
+   resultant relative speed `U = sqrt(ur^2 + vr^2)` itself from collapsing,
+   and `r_ndm = r*Lpp/U` (used throughout the hull force terms) blows up for
+   any nonzero yaw rate as `U→0`. This made Acados' SQP-RTI QP solver fail
+   outright during a live run, and because SQP-RTI's warm-started iterate
+   persists across calls, a single poisoned solve could freeze the
+   controller permanently rather than recovering on the next step. Fixed by
+   giving `IDX_U` a hard lower bound (`config.U_REF_MIN`, deliberately kept
+   just above zero) via `idxbx`/`lbx` in `nmpc_acados.py`'s own OCP (not
+   touching the read-only MMG model) — the optimizer can no longer drive
+   surge speed into the singular region mid-horizon, even though the model's
+   own `fmax` floor is just a smoothing device, not something the optimizer
+   was ever constrained to respect on its own.
 
 ## Running things
 
@@ -124,11 +170,15 @@ respect.
 python nmpc/path_following.py
 python nmpc/state_augmentation.py
 
-# Static-plot validation (4 scenarios, results/*.png)
-python -m nmpc.test_nmpc
+# Closed-loop validation harness (plant + solver, no obstacles) -- now lives
+# in nmpc_sim_nodes/tests/, not here; see the top-level README's executables
+# table for the full list (test_nmpc, test_closed_loop_noise, test_closed_loop_env)
+ros2 run nmpc_sim_nodes test_nmpc
 
-# Live-visualized run
-python nmpc/run_live.py --solver acados --scenario scenario_maker/scenario.json
+# Live-visualized run -- ros2 launch/run, not a standalone script (see
+# top-level README's "Getting started")
+ros2 launch nmpc_sim_nodes bringup.launch.py
+ros2 run nmpc_sim_nodes viz_node
 ```
 
 ## Dependencies

@@ -57,7 +57,7 @@ mmg_node:
     # that 300s bias tau to make the two statistically hard to separate. 21600, 0.000019
     current_time_constant: 21600.0
     current_sigma: 0.000019          # [m/s per sqrt(s)] driving noise intensity
-    current_seed: 234
+    current_seed: 7649
 
     wave_enabled: true           # independent toggle
     wave_hs: 4.0                  # [m] significant wave height, scaled-model units
@@ -65,7 +65,7 @@ mmg_node:
     wave_gamma: 3.3                # JONSWAP peak-enhancement factor (3.3 = standard North Sea fit)
     wave_mean_heading: 0.2        # [rad] earth-fixed mean wave direction
     wave_num_components: 30       # spectral discretization for Newman's approximation
-    wave_seed: 34
+    wave_seed: 36534
 
 ukf_node:
   ros__parameters:

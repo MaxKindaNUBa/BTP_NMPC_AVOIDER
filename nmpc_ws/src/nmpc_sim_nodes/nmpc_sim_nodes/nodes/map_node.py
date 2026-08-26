@@ -11,7 +11,7 @@ from ament_index_python.packages import get_package_share_directory
 from rclpy.node import Node
 from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 
-from . import _pkg_paths
+from .. import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 

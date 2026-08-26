@@ -1,5 +1,11 @@
 # research_papers
 
+See also `CURRENT_AWARE_NMPC_PAPERS.md` in this directory: a research survey
+on making the NMPC's own OCP model aware of water current (as opposed to
+just estimating it, which `ukf/` already does) -- written while diagnosing
+a QP-solver failure investigation, kept here since it's an analysis note in
+the same spirit as the papers below, not because it studies the same vessel.
+
 The two papers that directly shaped the NMPC formulation in `nmpc/`. Both
 study the **VTec S-III** autonomous surface vehicle (ASV) at Tecnologico de
 Monterrey; this project adapts their path-following + obstacle-avoidance

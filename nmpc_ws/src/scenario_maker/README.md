@@ -6,8 +6,13 @@ them; drag to "paint" circular obstacles at a coordinate with a chosen
 radius. Saves everything to `scenario.json`.
 
 Deliberately zero-dependency on the rest of the repo, same as
-`mpc_visualization/`: no CasADi, no Acados, no `nmpc/` imports. Nothing in
-`nmpc/` reads this file yet — it's purely an authoring tool for now.
+`mpc_visualization/`: no CasADi, no Acados, no `nmpc/` imports for the
+*editor* itself. `scenario.json`'s output IS actively read by the live sim
+now, though: `nmpc_sim_nodes/map_node.py` serves it over `/map/get_scenario`
+(waypoints, obstacles, `mmg_init`), and `nmpc_sim_nodes/tests/test_closed_loop_noise.py`/
+`test_closed_loop_env.py` load it directly for their headless rollouts,
+including the `obstacles` field — obstacle avoidance is exercised end-to-end
+against these, not against an empty list.
 
 ## Running it
 
@@ -51,8 +56,7 @@ points are stored and saved as `(x, y)` tuples in that order.
 
 ## `scenario.json` format
 
-Same shape as one entry of `SCENARIOS` in `nmpc/run_live.py`
-(`waypoints` / `mmg_init` / `sim_time`), plus an `obstacles` key:
+`waypoints` / `mmg_init` / `sim_time`, plus an `obstacles` key:
 
 ```json
 {
@@ -66,7 +70,7 @@ Same shape as one entry of `SCENARIOS` in `nmpc/run_live.py`
 - `waypoints` — `[start, ...intermediate waypoints in click order..., goal]`, each `[x, y]` in meters
 - `mmg_init` — `[u, v, r, x, y, psi]`; `x`/`y` are auto-synced to the start point, `u` comes from the "Initial Surge" box, everything else defaults to 0
 - `sim_time` — seconds, from the "Sim Time" box
-- `obstacles` — `[[x, y, radius], ...]` in meters, matching the `(ox, oy, orad)` triples `nmpc/path_following.py`'s `pad_obstacles()` already expects — not read by `nmpc/run_live.py` yet
+- `obstacles` — `[[x, y, radius], ...]` in meters, matching the `(ox, oy, orad)` triples `nmpc/path_following.py`'s `pad_obstacles()` expects -- actively read by the live sim graph and both closed-loop test harnesses, see above
 
 ## Dependencies
 

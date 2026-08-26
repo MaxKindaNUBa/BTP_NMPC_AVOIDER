@@ -17,7 +17,7 @@ from rclpy.qos import QoSDurabilityPolicy, QoSHistoryPolicy, QoSProfile, QoSReli
 from std_msgs.msg import ColorRGBA, String
 from visualization_msgs.msg import Marker, MarkerArray
 
-from . import _pkg_paths
+from .. import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 
