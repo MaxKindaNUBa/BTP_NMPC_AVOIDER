@@ -32,6 +32,12 @@ from nmpc.config import (
     IDX_EY, IDX_SPSI, IDX_CPSI, IDX_R, IDX_X, IDX_Y, IDX_PSI, IDX_U, IDX_V, IDX_DELTA, IDX_N,
     IDX_DDELTA, IDX_DN,
 )
+
+# "No upper bound" sentinel for a one-sided (lower-only) state bound below --
+# comfortably under acados' own infinity threshold (1e10, see the obstacle
+# dummy-distance fix in nmpc/README.md's bug list) but far past any realistic
+# surge speed, so it never binds.
+_U_NO_UPPER_BOUND = 1e3
 from nmpc.params import DEFAULT_CONFIG
 from nmpc.state_augmentation import augmented_dynamics_casadi
 from nmpc.path_following import (
@@ -132,13 +138,22 @@ def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
     # ---- state/control bounds ----
     ocp.constraints.x0 = np.array(xi_ref0)  # placeholder; overwritten every solve() call
 
-    ocp.constraints.idxbx = np.array([IDX_DELTA, IDX_N])   # only delta/n states are bounded
-    ocp.constraints.lbx = np.array([config.DELTA_MIN, config.RPS_MIN])
-    ocp.constraints.ubx = np.array([config.DELTA_MAX, config.RPS_MAX])
+    # IDX_U carries a hard lower bound (U_REF_MIN, deliberately kept just above
+    # zero) so the optimizer can never drive surge speed to ~0 mid-horizon: at
+    # u≈0 with v also small, casadi_mmg.py's U=sqrt(ur^2+vr^2) divisor behind
+    # v_ndm/r_ndm collapses and r_ndm blows up for any nonzero yaw rate,
+    # poisoning the QP -- observed in practice during a low-speed pivot near a
+    # target (braking ramp active). u_val is floored inside the MMG model
+    # itself (ca.fmax), but that's a smoothing floor, not something the
+    # optimizer is constrained to respect; this bound is what actually keeps
+    # the solver out of that region. See nmpc/README.md's "Known open issue".
+    ocp.constraints.idxbx = np.array([IDX_U, IDX_DELTA, IDX_N])
+    ocp.constraints.lbx = np.array([config.U_REF_MIN, config.DELTA_MIN, config.RPS_MIN])
+    ocp.constraints.ubx = np.array([_U_NO_UPPER_BOUND, config.DELTA_MAX, config.RPS_MAX])
 
-    ocp.constraints.idxbx_e = np.array([IDX_DELTA, IDX_N])  # same bounds at the terminal stage
-    ocp.constraints.lbx_e = np.array([config.DELTA_MIN, config.RPS_MIN])
-    ocp.constraints.ubx_e = np.array([config.DELTA_MAX, config.RPS_MAX])
+    ocp.constraints.idxbx_e = np.array([IDX_U, IDX_DELTA, IDX_N])  # same bounds at the terminal stage
+    ocp.constraints.lbx_e = np.array([config.U_REF_MIN, config.DELTA_MIN, config.RPS_MIN])
+    ocp.constraints.ubx_e = np.array([_U_NO_UPPER_BOUND, config.DELTA_MAX, config.RPS_MAX])
 
     ocp.constraints.idxbu = np.array([IDX_DDELTA, IDX_DN])  # rate limits on both controls
     ocp.constraints.lbu = np.array([config.DELTA_DOT_MIN, config.RPS_DOT_MIN])

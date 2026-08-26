@@ -35,7 +35,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from ament_index_python.packages import get_package_share_directory
 
-from . import _pkg_paths
+from .. import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 

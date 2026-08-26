@@ -10,7 +10,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 
-from . import _pkg_paths
+from .. import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 

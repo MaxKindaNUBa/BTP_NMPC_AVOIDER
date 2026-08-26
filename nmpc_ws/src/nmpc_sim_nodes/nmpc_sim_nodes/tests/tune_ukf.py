@@ -53,7 +53,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.optimize import minimize
 
-from . import _pkg_paths
+from .. import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 
