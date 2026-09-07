@@ -10,8 +10,7 @@ _WAVE_TRAIL_LEN = 25  # how many recent wave-force samples the fading scatter ke
 
 class HUDVisualizer:
     """Standalone companion window: current compass, wave-force scatter, and the
-    control-horizon graph -- the same data MPCVisualizer draws inset over its own
-    map, broken out here so it can run alongside RViz2 (or headless) without
+    control-horizon graph, meant to run alongside RViz2 (or headless) without
     drawing on top of a 3D/2D view.
     """
 

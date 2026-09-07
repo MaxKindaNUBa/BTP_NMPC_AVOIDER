@@ -42,7 +42,7 @@ _pkg_paths.ensure_on_path()
 from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 from nmpc.nmpc_acados import AcadosNMPC  # noqa: E402
-from nmpc.path_following import compute_path_angle, select_active_waypoint  # noqa: E402
+from nmpc.path_following import select_active_waypoint, segments_from_waypoints  # noqa: E402
 from env_model.config import load_current_config, load_wave_config  # noqa: E402
 from env_model.current_model import CurrentModel  # noqa: E402
 from env_model.wave_model import WaveModel  # noqa: E402
@@ -123,11 +123,9 @@ def run_closed_loop(nmpc: AcadosNMPC, scenario: dict, current_model, wave_model)
     t = 0.0
 
     for _ in range(max_steps):
-        prev_wp, target_wp = waypoints[target_idx - 1], waypoints[target_idx]
-        chi_p = compute_path_angle(prev_wp, target_wp)
-        x_d, y_d = target_wp
+        segments = segments_from_waypoints(waypoints, target_idx)
 
-        result = nmpc.solve(list(mmg_state), delta, n, chi_p, x_d, y_d, obstacles=obstacles)
+        result = nmpc.solve(list(mmg_state), delta, n, segments, obstacles=obstacles)
         delta, n = result["delta"], result["n"]
 
         xs.append(float(mmg_state[3]))

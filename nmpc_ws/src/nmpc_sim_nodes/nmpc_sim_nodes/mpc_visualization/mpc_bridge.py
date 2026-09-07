@@ -23,10 +23,9 @@ class CurrentReading:
 
 @dataclass
 class WaveReading:
-    """Latest /env/wave_state sample. Frame is caller-defined: viz_node.py rotates
-    the message's body-frame fx/fy to earth-frame (fx=North, fy=East) for its
-    map-aligned compass inset; hud_node.py stores WaveState's raw body-frame
-    fx/fy as-is, since its wave widget is a frame-agnostic force-space scatter."""
+    """Latest /env/wave_state sample. Frame is caller-defined: hud_node.py
+    stores WaveState's raw body-frame fx/fy as-is, since its wave widget is a
+    frame-agnostic force-space scatter."""
     fx: float = 0.0
     fy: float = 0.0
     fn: float = 0.0

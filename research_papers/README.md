@@ -6,6 +6,53 @@ just estimating it, which `ukf/` already does) -- written while diagnosing
 a QP-solver failure investigation, kept here since it's an analysis note in
 the same spirit as the papers below, not because it studies the same vessel.
 
+See also `GRID_AWARE_NMPC_OBSTACLE_AVOIDANCE.md`: a theory-only design note
+on replacing the circle `(x,y,radius)` obstacle-avoidance constraint in
+`nmpc_acados.py` with one derived from a LIDAR-predicted NxN occupancy grid
+(distance-transform + differentiable interpolation, an optional smooth
+potential cost term, and the partial-observability considerations --
+egocentric rolling grid, confidence-weighted fading -- that come with a
+limited-range sensor). No implementation yet; kept here as the design
+record for when that integration starts.
+
+See also `NON_CIRCULAR_OBSTACLE_PRIMITIVES.md`: the implementation record for
+the same non-circular-obstacle goal `GRID_AWARE_NMPC_OBSTACLE_AVOIDANCE.md`
+explored, arrived at by a different, non-grid route -- harbor walls/quays
+modeled as capsules (a circle's natural generalization: a padded line
+segment) and other ships modeled as ellipses (via a gradient-normalized
+approximate distance, the standard fix for an algebraic obstacle
+representation having no natural units-in-meters), all three unified into a
+single soft-min-aggregated distance constraint (one row, one slack,
+replacing the old one-row-per-circle scheme), backed by outside validation
+(acados' own forum guidance, published SDF-NMPC/PSDF-MPC projects, and a
+paper independently confirming the ellipse units-mismatch problem) for why
+the grid stayed out of the solver path entirely. Implemented and verified --
+`nmpc_acados.py`, `path_following.py`, `scenario_editor.py`, and the ROS
+message/topic plumbing all changed; see that document for the full
+file-by-file list and two genuinely tricky bugs it documents finding and
+fixing along the way (a numerical soft-min underflow, and a slack-weight
+units mismatch that let a real collision through undetected).
+
+See also `COLREGS_AWARE_NMPC_MOVING_OBSTACLES.md`: the moving-obstacle
+companion to the grid note above -- why static (grid) and moving (tracked
+circle) obstacles stay architecturally separate, constant-velocity
+per-stage constraint propagation, growing/chance-constrained safety
+margins, DCPA/TCPA in the constraint vs. the cost, how COLREGS give-way/
+stand-on roles are sensed and classified (Rules 13-17), and what protects
+the ship if the other vessel doesn't comply. Also theory-only, no
+implementation yet.
+
+See also `NOMOTO_ESTIMATION_AND_SAFE_AUTONOMY.md`: a more speculative
+follow-on to the COLREGS note above, on (1) replacing constant-velocity
+target-motion extrapolation with a Nomoto-relaxation-model estimator (the
+same hidden-state UKF pattern this project already uses for current
+estimation, pointed at a target ship instead), and (2) an own-ship
+failsafe -- a Simplex-architecture-style CBF-QP safety filter cascaded
+after the NMPC -- that is safe independently of the target's compliance
+or the NMPC's own correctness, addressing the gap that the COLREGS note's
+three "protections" all lived inside the same NMPC loop. Theory-only, no
+implementation yet.
+
 The two papers that directly shaped the NMPC formulation in `nmpc/`. Both
 study the **VTec S-III** autonomous surface vehicle (ASV) at Tecnologico de
 Monterrey; this project adapts their path-following + obstacle-avoidance

@@ -45,7 +45,7 @@ _pkg_paths.ensure_on_path()
 from casadi_mmg_solver.casadi_mmg import make_casadi_accel_function, make_casadi_integrator  # noqa: E402
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 from nmpc.nmpc_acados import AcadosNMPC  # noqa: E402
-from nmpc.path_following import compute_path_angle, select_active_waypoint  # noqa: E402
+from nmpc.path_following import select_active_waypoint, segments_from_waypoints  # noqa: E402
 from sensor_model.config import load_preset_and_seed  # noqa: E402
 from sensor_model.sensor_model import SensorModel  # noqa: E402
 from ukf.config import accel_bias_decay, load_ukf_config, pos_bias_decay  # noqa: E402
@@ -152,9 +152,7 @@ def run_closed_loop(nmpc: AcadosNMPC, scenario: dict, sensor_model, ukf: Unscent
     t = 0.0
 
     for _ in range(max_steps):
-        prev_wp, target_wp = waypoints[target_idx - 1], waypoints[target_idx]
-        chi_p = compute_path_angle(prev_wp, target_wp)
-        x_d, y_d = target_wp
+        segments = segments_from_waypoints(waypoints, target_idx)
 
         current = current_model.step(dt) if current_model is not None else (0.0, 0.0)
         wave_force = wave_model.force(float(mmg_state[5])) if wave_model is not None else (0.0, 0.0, 0.0)
@@ -179,7 +177,7 @@ def run_closed_loop(nmpc: AcadosNMPC, scenario: dict, sensor_model, ukf: Unscent
             # reading (the true current) when there's no estimator in the loop.
             nmpc_current = (float(current[0]), float(current[1]))
 
-        result = nmpc.solve(meas_state, meas_delta, meas_n, chi_p, x_d, y_d,
+        result = nmpc.solve(meas_state, meas_delta, meas_n, segments,
                              obstacles=obstacles, current=nmpc_current)
         delta, n = result["delta"], result["n"]
 

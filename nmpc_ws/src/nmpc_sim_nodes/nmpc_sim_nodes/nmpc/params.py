@@ -89,11 +89,25 @@ class NMPCConfig:
     W_SLACK: float
     OBSTACLE_START_K: int
     MAX_OBSTACLES: int
+    MAX_WALLS: int
+    MAX_ELLIPSES: int
+    SOFTMIN_K: float
 
     # ---------------- Weight matrices ----------------
     Q_DIAG: tuple
     R_DIAG: tuple
     QE_SCALE: float
+
+    # ---------------- Waypoint-passage weight boost ----------------
+    # Q[x]/Q[y] (raw position error) is boosted by this factor, ONLY for the
+    # horizon stages predicted within WAYPOINT_PASSAGE_DIST (arclength) of a
+    # real waypoint (see build_horizon_references' dist_to_corner_arr) --
+    # everywhere else the cost is untouched, so this pulls the trajectory
+    # through the actual waypoint at a crossing without adding control
+    # effort along the rest of a leg, where cheaper cross-track/line-
+    # following (Q[e_y]) already governs. See nmpc/README.md item 9.
+    WAYPOINT_PASSAGE_DIST: float
+    WAYPOINT_PASSAGE_XY_BOOST: float
 
     # ---------------- Acados (deploy solver) ----------------
     ACADOS_QP_SOLVER: str
@@ -164,9 +178,14 @@ def load_nmpc_config(path: str = None) -> NMPCConfig:
         W_SLACK=float(nmpc_p["W_SLACK"]),
         OBSTACLE_START_K=int(nmpc_p["OBSTACLE_START_K"]),
         MAX_OBSTACLES=int(nmpc_p["MAX_OBSTACLES"]),
+        MAX_WALLS=int(nmpc_p["MAX_WALLS"]),
+        MAX_ELLIPSES=int(nmpc_p["MAX_ELLIPSES"]),
+        SOFTMIN_K=float(nmpc_p["SOFTMIN_K"]),
         Q_DIAG=tuple(float(v) for v in nmpc_p["Q_DIAG"]),
         R_DIAG=tuple(float(v) for v in nmpc_p["R_DIAG"]),
         QE_SCALE=float(nmpc_p["QE_SCALE"]),
+        WAYPOINT_PASSAGE_DIST=float(nmpc_p["WAYPOINT_PASSAGE_DIST"]),
+        WAYPOINT_PASSAGE_XY_BOOST=float(nmpc_p["WAYPOINT_PASSAGE_XY_BOOST"]),
         ACADOS_QP_SOLVER=str(nmpc_p["ACADOS_QP_SOLVER"]),
         ACADOS_NLP_SOLVER=str(nmpc_p["ACADOS_NLP_SOLVER"]),
         ACADOS_INTEGRATOR=str(nmpc_p["ACADOS_INTEGRATOR"]),

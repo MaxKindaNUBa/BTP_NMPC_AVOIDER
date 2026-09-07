@@ -3,4 +3,6 @@ VesselState initial_state
 float64[] waypoints_x
 float64[] waypoints_y
 Obstacle[] obstacles
+WallObstacle[] walls
+Ellipse[] ellipses
 float64 sim_time_fixed

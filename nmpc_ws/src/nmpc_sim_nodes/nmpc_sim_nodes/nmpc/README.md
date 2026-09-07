@@ -22,7 +22,7 @@ in `nmpc_sim_nodes/tests/` (`test_nmpc.py`, `test_closed_loop_noise.py`,
 `test_closed_loop_env.py`) -- see the top-level README's executables table --
 not inside this directory. `run_live.py`/`compare_qu.py` (an early live-viz
 runner and an ad-hoc `Q[u]` diagnostic script) predate the ROS2 restructuring
-and no longer exist; `viz_node`/`rviz_node`/`hud_node` are their replacements.
+and no longer exist; `rviz_node`/`hud_node` are their replacements.
 
 ## The augmented state
 
@@ -162,6 +162,101 @@ again if the formulation is ever touched without this context:
    surge speed into the singular region mid-horizon, even though the model's
    own `fmax` floor is just a smoothing device, not something the optimizer
    was ever constrained to respect on its own.
+8. **No lookahead across a waypoint switch → rudder saturation + reactive
+   (self-defeating) braking on sharp turns.** `chi_p`/`x_d`/`y_d` (and the
+   `u_ref` fed through `compute_effective_u_ref`) were pure functions of the
+   *single currently active* waypoint/leg, and `nmpc_acados.py`'s `solve()`
+   pushed that one fixed reference into every stage of its 20s/`N=200`
+   horizon. A sharp turn (this project's own `scenario.json` has legs
+   turning up to ~150°) produced an instantaneous course-error step the
+   moment `select_active_waypoint`'s gate fired, saturating the rudder;
+   `compute_effective_u_ref`'s distance-only ramp then reset to full cruise
+   the instant the target switched (now measuring distance to the new,
+   far-away target), so deceleration was an emergent side-effect of the QP
+   minimizing `Q[x]`/`Q[y]` position error under a stuck rudder rather than
+   a deliberate pre-turn brake — confirmed live via
+   `nmpc_experiment_20260826_222937`'s telemetry: `cmd_delta_deg` pegged at
+   +45° and `true_psi_deg` stalled ~140-160° off target for 20+ seconds
+   after crossing a waypoint, while `cmd_n_rps` was pushed hard negative
+   *after* the rudder was already saturated (rudder authority scales with
+   surge speed, so that reactive braking was actively working against the
+   turn it was reacting to). Fixed by giving the solver a genuine preview of
+   however many upcoming path segments fall inside the horizon, not just the
+   currently active one: `path_following.py`'s `SegmentQueue` (append
+   newer segments to the back, `pop_crossed()` retires one the instant its
+   endpoint is passed — driven by the same `is_segment_crossed` predicate
+   `select_active_waypoint` itself now delegates to) feeds
+   `build_horizon_references()`, which walks the queue by predicted
+   arclength (`speed_est`, floored/recomputed fresh every `solve()` call)
+   and returns per-stage `(chi_p, x_d, y_d, u_ref)` arrays — `nmpc_acados.py`
+   pushes these into acados' existing per-stage `p`/`yref` slots (already
+   stage-indexed, just previously fed the same value at every `k`) instead
+   of one fixed reference. `map_node` owns the live queue (seeded once with
+   the whole remaining static path, popped in lockstep with `target_idx`);
+   the design is deliberately queue-based (not just "preview the next
+   waypoint") so it also handles waypoints spaced closer together than the
+   horizon's travel distance (e.g. ~1-2 ship-lengths, `LPP=2.902m` →
+   ~3-6m — several such legs fit inside a 20s/`U_REF=0.70m/s` ≈14m horizon),
+   and so a future *dynamic* segment producer (e.g. a LIDAR-derived rolling
+   window of locally-sensed segments) can drive the same queue via
+   `append()`/`pop_crossed()` without changing anything on the
+   NMPC-consuming side. `select_active_waypoint()`'s own gate logic is
+   unchanged — this only changes what's *previewed* inside a solve's
+   horizon, not when the real `target_idx` advances.
+8b. **Follow-up: item 8 alone doesn't complete a genuinely sharp turn.**
+   Verified only against a mild ~60° turn at first, item 8's design let
+   `chi_p_arr` AND `x_d_arr`/`y_d_arr` switch together, per stage, at the
+   same predicted arclength boundary. On a real ~117° turn
+   (`scenario.json`'s wp0→wp1→wp2) this let part of the horizon reference a
+   position target tens of meters away in a very different direction while
+   the ship was still only ~5m from the REAL current waypoint — the large
+   predicted position error to that far target dominated (and defeated) the
+   much smaller cost of slowing down, so the ship never actually closed
+   `select_active_waypoint`'s gate: it got within ~3.3-3.8m
+   (`WP_RADIUS=2.0m`) and then circled the waypoint indefinitely (`psi`
+   climbing monotonically past 600° over ~150s, rudder pinned near ±45°,
+   thrust mostly still at max) rather than braking and threading it.
+   Reproduced identically with item 9's boost disabled, confirming it was
+   an item-8 bug, not an item-9 one. Fixed by decoupling heading preview
+   from position targeting in `build_horizon_references`: `chi_p_arr` still
+   previews ahead across however many segments fit in the horizon (so the
+   solver can start turning early), but `x_d_arr`/`y_d_arr` now stay pinned
+   to `survivors[0]`'s endpoint — the single REAL current target — for
+   every stage, changing only when `SegmentQueue.pop_crossed()` actually
+   pops it between `solve()` calls, never inside a single horizon's
+   internal walk. This makes later stages ask for "be *at* the real target,
+   already facing the next leg's direction" instead of "rush toward a
+   distant point," which removes the rush-instead-of-brake pressure by
+   construction. Verified on the same ~117° turn: crosses the gate cleanly
+   at `t=89s`, closest approach 0.93m (with item 9's boost) / 1.33m
+   (without) — both comfortably inside `WP_RADIUS`, zero solver failures
+   across 2600 steps, versus never crossing at all before this fix.
+9. **Corner-cutting: the solver passes NEAR a waypoint, not through it.**
+   Even with item 8's horizon preview, the optimizer would route inside
+   both adjacent lines at a corner rather than actually threading the
+   waypoint point — cheap under the existing cost, since cross-track error
+   to the LINE (`Q[e_y]=10.0`) dominates raw position error to the target
+   POINT (`Q[x]=Q[y]=5.0`), and cutting the corner keeps `e_y` low against
+   *both* lines simultaneously without the sharper maneuvering "must reach
+   the exact point" would cost. Fixed *without* raising `Q[x]`/`Q[y]`
+   everywhere (which would fight cheap line-following, and cost more
+   control effort, along the entire leg): `build_horizon_references()` also
+   returns `dist_to_corner_arr`, each stage's predicted arclength distance
+   to the nearest real waypoint (from the same `cum_dist` breakpoints
+   already computed for the segment walk); `AcadosNMPC.__init__` precomputes
+   a second `(W, W_e)` pair with `Q[x]`/`Q[y]` scaled by
+   `WAYPOINT_PASSAGE_XY_BOOST`, and `solve()` applies it — via acados'
+   runtime `cost_set(stage, "W", ...)`, confirmed available with no OCP
+   rebuild needed — only to stages where `dist_to_corner_arr <=
+   WAYPOINT_PASSAGE_DIST`; every other stage keeps the unmodified default
+   weights. The boost (default 4.0×, `Q[x]=Q[y]` 5.0→20.0, comfortably past
+   `Q[e_y]=10.0`) and window (default 4.0m, ~2×`WP_RADIUS`) are both
+   `sim_params.yaml` tunables. Verified on the same ~117° turn used in item
+   8b, *after* that fix (this one alone doesn't help while item 8b's bug is
+   still present — the two were confounded in initial testing, 0.98m
+   no-boost vs 1.02m boosted on a mild turn, no measurable difference):
+   closest approach to the waypoint 0.93m with the boost vs 1.33m without,
+   both on top of item 8b's fix — a real, if modest, improvement.
 
 ## Running things
 
@@ -178,7 +273,7 @@ ros2 run nmpc_sim_nodes test_nmpc
 # Live-visualized run -- ros2 launch/run, not a standalone script (see
 # top-level README's "Getting started")
 ros2 launch nmpc_sim_nodes bringup.launch.py
-ros2 run nmpc_sim_nodes viz_node
+ros2 launch nmpc_sim_nodes rviz_hud.launch.py
 ```
 
 ## Dependencies

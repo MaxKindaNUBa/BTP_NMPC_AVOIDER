@@ -134,9 +134,9 @@ a known-good reference, instead of being debugged blind.
                                   │ streams live state/predictions to
                                   ▼
                      ┌─────────────────────────┐
-                     │   mpc_visualization/        │   standalone dashboard,
-                     │   mpc_bridge / visualizer   │   built + proven with mock
-                     └─────────────────────────┘   data before real NMPC existed
+                     │   mpc_visualization/        │   HUD data-bridge shared
+                     │   mpc_bridge / hud_visualizer│   with hud_node's companion
+                     └─────────────────────────┘   window (current/wave/ctrl)
 ```
 
 `research_papers/` (cited by title/DOI, not committed as PDFs — see below)
@@ -435,14 +435,13 @@ nmpc_ws/
   src/
     nmpc_interfaces/            Shared msg/srv definitions for the sim's ROS2 node graph
     nmpc_sim_nodes/              map_node, nmpc_node, ukf_node, mmg_node -- the
-                                  simulation graph -- plus viz_node / rviz_node / hud_node
-                                  (independently launchable live visualizers) and
-                                  run_demo executables. Also contains the actual
-                                  controller/model code, physically moved in here
-                                  as subpackages:
+                                  simulation graph -- plus rviz_node / hud_node
+                                  (independently launchable live visualizers).
+                                  Also contains the actual controller/model
+                                  code, physically moved in here as subpackages:
       nmpc_sim_nodes/nodes/                   The ROS2 node entry points themselves:
                                                 map_node, nmpc_node, ukf_node, mmg_node,
-                                                viz_node, rviz_node, hud_node, logger_node
+                                                rviz_node, hud_node, logger_node
                                                 (executable names unchanged, only the
                                                 module path moved here).
       nmpc_sim_nodes/tests/                    Standalone (no live ROS graph needed)
@@ -458,9 +457,11 @@ nmpc_ws/
       nmpc_sim_nodes/nmpc/                    The NMPC controller (both solvers) -- see
                                                 its own README, linked above
       nmpc_sim_nodes/casadi_mmg_solver/       CasADi symbolic MMG port + acados SimSolver
-      nmpc_sim_nodes/mpc_visualization/       The matplotlib live-visualization dashboard
-                                                (viz_node's full map+control-horizon window)
-                                                and hud_node's standalone companion window
+      nmpc_sim_nodes/mpc_visualization/       Shared data-bridge (mpc_bridge.py) and
+                                                hud_node's standalone matplotlib companion
+                                                window (hud_visualizer.py) -- current
+                                                compass, wave-force scatter, control-
+                                                horizon graph
       nmpc_sim_nodes/sensor_model/            GPS/compass/gyro/IMU-accel/actuator noise
                                                 model, run in-process by mmg_node
       nmpc_sim_nodes/env_model/               Toggleable current (OU process) + wave
@@ -502,10 +503,8 @@ added/removed/renamed:
 | `nmpc_sim_nodes` | `ukf_node` | Unscented Kalman Filter state estimator, serving `/ukf/estimate` -- called synchronously by `mmg_node` every tick. Reconstructs `[u,v,r,x,y,psi]` and estimates earth-frame current `[vcx,vcy]` from `mmg_node`'s GPS/gyro/IMU-accel sensor stream (no direct velocity measurement -- see `sensor_model` below). Always runs and publishes `/ukf/estimated_state`/`/ukf/estimated_current` for logging/RViz regardless of `mmg_node`'s `use_ukf` toggle; **the current estimate IS fed into the NMPC's own prediction model** (via `mmg_node`'s `/nmpc/solve` request, when `use_ukf=True` -- see [The NMPC formulation](#the-nmpc-formulation)), though the estimate's own accuracy is independent of that -- most of this project's UKF tuning work concerns accuracy, not this wiring. `q_diag`/`p0_diag` for the current and sensor-bias states are derived live from `sim_params.yaml`'s actual `current_sigma`/`current_time_constant`/`sensor_preset` (`ukf/config.py`'s `current_noise_diag()`/`bias_noise_diag()`), not hardcoded literals, so they can't silently go stale when those change. |
 | `nmpc_sim_nodes` | `mmg_node` | Plant integrator and the master `1/dt` clock. Also owns, in-process (no separate nodes): a toggleable GPS/compass/gyro/IMU-accelerometer/actuator noise model (`sensor_enabled`, default off/light preset) applied before every `/ukf/estimate` call, and a toggleable current (Ornstein-Uhlenbeck) + wave (JONSWAP + Newman's-approximation drift force) disturbance model (`current_enabled`/`wave_enabled`) folded into the plant integrator -- current (not wave) is additionally forwarded into `/nmpc/solve`'s request from `ukf_node`'s own estimate, so the NMPC's own dynamics also account for it (see [The NMPC formulation](#the-nmpc-formulation)). `use_ukf` (`mmg_node.py`'s own `declare_parameter` default is `False`; `sim_params.yaml` currently sets it `true`) selects whether `/nmpc/solve`'s request comes from `ukf_node`'s estimate or the true state directly. |
 | `nmpc_sim_nodes` | `logger_node` | Synchronous experiment logger; captures metadata, scenario copy, timeseries telemetry CSV, prediction horizons NPZ, and summary JSON, plus (via `ControllerEffortLogger`, fed off `nmpc_node`'s `/nmpc/controller_effort_raw` topic on its own background thread) a per-step Q/R cost breakdown and control-effort diagnostics in `costs_errors.csv`, folded into the same run's `summary.json`. Automatically launched with `bringup.launch.py`. |
-| `nmpc_sim_nodes` | `viz_node` | Standalone live matplotlib dashboard; late-joins a running sim via `/map/get_scenario` + topics, independent of the map/nmpc/mmg nodes. Its current compass overlays a 2nd needle for `ukf_node`'s predicted current alongside the true one (`actual \| predicted`, one ring, no new panel), and its `SHIP STATUS` telemetry text shows `X`/`Y` the same way. |
 | `nmpc_sim_nodes` | `rviz_node` | Republishes the sim's own topics as `visualization_msgs/MarkerArray` so RViz2 can render the same simulation, plus two `OverlayText` HUDs (bottom-left `SHIP STATUS`, top-right `CURRENT`/`WAVE`). Both current-related lines and `SHIP STATUS`'s `X`/`Y` show `actual \| predicted` (from `/ukf/estimated_current`/`/ukf/estimated_state`) on the same line, no new rows; a 2nd arrow marker (`ukf_current`, distinct color) renders the predicted current at the ship's position alongside the actual-current arrow. Run via `rviz_hud.launch.py` below, not usually standalone. |
-| `nmpc_sim_nodes` | `hud_node` | Standalone matplotlib companion window (current compass, wave-force scatter, NMPC control-horizon graph); run alongside `rviz_node`/RViz2 (see `rviz_hud.launch.py` below) or `viz_node`. Current compass shows the same 2nd-needle `actual \| predicted` overlay as `viz_node`'s. |
-| `nmpc_sim_nodes` | `run_demo` | Standalone mock-data demo of the visualization dashboard (fake circular-motion ship, no real NMPC or sim node graph). |
+| `nmpc_sim_nodes` | `hud_node` | Standalone matplotlib companion window (current compass, wave-force scatter, NMPC control-horizon graph); run alongside `rviz_node`/RViz2 (see `rviz_hud.launch.py` below). Current compass shows a 2nd-needle `actual \| predicted` overlay for `ukf_node`'s predicted current. |
 | `nmpc_sim_nodes` | `test_nmpc` | Closed-loop NMPC validation harness, no obstacles; produces plots under `~/nmpc_sim_logs/test_nmpc_results/`. |
 | `nmpc_sim_nodes` | `test_sensor_model` | Standalone true-vs-measured comparison for `mmg_node`'s sensor noise model (GPS/compass/gyro/IMU-accel -- no u,v); no other node needs to be running. Produces plots/CSVs under `~/nmpc_sim_logs/test_sensor_model_results/`. |
 | `nmpc_sim_nodes` | `test_closed_loop_noise` | Standalone headless run of the full pipeline (acados NMPC + MMG plant integrator, WITH current/wave from `sim_params.yaml` in the true plant AND fed into the solver exactly like `mmg_node`/`nmpc_node` do live) on `scenario.json`, twice -- once with no noise (true state straight into NMPC), once with the light noise preset filtered through a `UnscentedKalmanFilter` before reaching NMPC -- at accelerated (unthrottled) speed. Prints true-vs-UKF-estimated position RMSE and saves a path-comparison plot (true, UKF-filtered-true, and UKF-estimated trajectories) under `~/nmpc_sim_logs/test_closed_loop_noise_results/` -- the most direct standalone read on what a live `bringup.launch.py` run's x/y tracking looks like. |
@@ -547,11 +546,10 @@ source nmpc_ws/install/setup.bash
 #    current/wave disturbance run in-process inside mmg_node)
 ros2 launch nmpc_sim_nodes bringup.launch.py
 
-# 4. Watch it live, in a separate terminal -- matplotlib dashboard...
-ros2 run nmpc_sim_nodes viz_node
-# ...or RViz2 + its HUD companion window together (needs `unset GTK_PATH` first
-# if RViz2 fails to launch from some terminals -- this launch file does that
-# itself already, so it's only relevant if running rviz2 standalone):
+# 4. Watch it live, in a separate terminal -- RViz2 + its HUD companion window
+# together (needs `unset GTK_PATH` first if RViz2 fails to launch from some
+# terminals -- this launch file does that itself already, so it's only
+# relevant if running rviz2 standalone):
 ros2 launch nmpc_sim_nodes rviz_hud.launch.py
 
 # 5. Build/edit a custom scenario layout with start, waypoints, goal, and obstacles
@@ -634,10 +632,10 @@ different machine.
   current estimate. Standalone comparison harness: `test_ukf` (a turning
   circle maneuver, plus a current-vs-null-baseline RMSE check); automated
   Q/R tuning: `tune_ukf`.
-- RViz2/matplotlib HUDs (`rviz_node`, `viz_node`, `hud_node`) all show the
-  UKF's predicted current (and, for `rviz_node`/`viz_node`, predicted x/y)
-  directly alongside the actual/true values, `actual | predicted`, for at-a-
-  glance comparison without needing a separate plotting pass.
+- RViz2/matplotlib HUDs (`rviz_node`, `hud_node`) all show the UKF's
+  predicted current (and, for `rviz_node`, predicted x/y) directly alongside
+  the actual/true values, `actual | predicted`, for at-a-glance comparison
+  without needing a separate plotting pass.
 
 **Known open bug:**
 - The low-speed MMG singularity described above, which can freeze the

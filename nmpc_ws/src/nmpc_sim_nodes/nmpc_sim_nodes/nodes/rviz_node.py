@@ -24,8 +24,8 @@ _pkg_paths.ensure_on_path()
 from nmpc.config import IDX_X, IDX_Y  # noqa: E402
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
-from nmpc_interfaces.msg import (ActiveReference, CurrentState, ObstacleArray, PredictionHorizon,  # noqa: E402
-                                  SimStatus, VesselState, WaveState)
+from nmpc_interfaces.msg import (ActiveReference, CurrentState, EllipseArray, ObstacleArray,  # noqa: E402
+                                  PredictionHorizon, SimStatus, VesselState, WaveState, WallObstacleArray)
 from nmpc_interfaces.srv import GetScenario  # noqa: E402
 from rviz_2d_overlay_msgs.msg import OverlayText  # noqa: E402
 
@@ -82,6 +82,30 @@ def _overlay_text(text, horizontal_alignment, vertical_alignment, horizontal_dis
     return m
 
 
+def _point_to_segment_dist(px, py, x0, y0, x1, y1):
+    """Plain-python twin of nmpc/path_following.py's capsule_distance_casadi
+    (minus the radius padding, minus the CasADi symbolics) -- used only for
+    the HUD's nearest-obstacle readout, not the solver."""
+    ex, ey = x1 - x0, y1 - y0
+    denom = ex * ex + ey * ey
+    t = 0.0 if denom < 1e-9 else max(0.0, min(1.0, ((px - x0) * ex + (py - y0) * ey) / denom))
+    cx, cy = x0 + t * ex, y0 + t * ey
+    return math.hypot(px - cx, py - cy)
+
+
+def _point_ellipse_distance(px, py, xc, yc, a, b, theta):
+    """Plain-python twin of nmpc/path_following.py's ellipse_distance_casadi
+    (minus r_pad, minus the CasADi symbolics) -- APPROXIMATE (gradient-
+    normalized, not exact -- no closed form exists), same formula, used only
+    for the HUD's nearest-obstacle readout, not the solver. See
+    research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md."""
+    dx = (px - xc) * math.cos(theta) + (py - yc) * math.sin(theta)
+    dy = -(px - xc) * math.sin(theta) + (py - yc) * math.cos(theta)
+    g = (dx / a) ** 2 + (dy / b) ** 2 - 1.0
+    grad_mag = 2.0 * math.sqrt((dx / a ** 2) ** 2 + (dy / b ** 2) ** 2)
+    return g / (grad_mag + 1e-9)
+
+
 def _plot_point(state_x, state_y, z=0.0):
     # mpc_visualization/visualizer.py plots everything as set_data(state_y, state_x)
     # (X axis on screen = East/state_y, Y axis on screen = North/state_x) -- match
@@ -124,6 +148,8 @@ class RvizNode(Node):
 
         self._path_markers = self._build_path_markers(waypoints)
         self._obstacle_markers = [self._build_obstacle_marker(o) for o in scenario.obstacles]
+        self._wall_markers = [self._build_wall_marker(w) for w in scenario.walls]
+        self._ellipse_markers = [self._build_ellipse_marker(e) for e in scenario.ellipses]
         self._ship_marker = None
         self._trail_marker = None
         self._prediction_marker = None
@@ -142,6 +168,8 @@ class RvizNode(Node):
         self._goal = waypoints[-1]
         self._active_waypoint = None
         self._obstacles_xyr = [(o.x, o.y, o.radius) for o in scenario.obstacles]
+        self._walls_xyr = [(w.x0, w.y0, w.x1, w.y1, w.radius) for w in scenario.walls]
+        self._ellipses_xyabtheta = [(e.x, e.y, e.a, e.b, e.theta) for e in scenario.ellipses]
 
         # clear any markers left over from a previous run/session before publishing fresh ones
         clear = Marker()
@@ -153,6 +181,8 @@ class RvizNode(Node):
         self.create_subscription(VesselState, '/mmg/state', self._on_mmg_state, 10)
         self.create_subscription(PredictionHorizon, '/nmpc/prediction_horizon', self._on_prediction_horizon, 10)
         self.create_subscription(ObstacleArray, '/map/obstacles', self._on_obstacles, _LATCHED_QOS)
+        self.create_subscription(WallObstacleArray, '/map/walls', self._on_walls, _LATCHED_QOS)
+        self.create_subscription(EllipseArray, '/map/ellipses', self._on_ellipses, _LATCHED_QOS)
         self.create_subscription(ActiveReference, '/map/active_reference', self._on_active_reference, _REFERENCE_QOS)
         self.create_subscription(SimStatus, '/map/sim_status', self._on_sim_status, _LATCHED_QOS)
         self.create_subscription(CurrentState, '/env/current_state', self._on_current_state, 10)
@@ -160,7 +190,8 @@ class RvizNode(Node):
         self.create_subscription(CurrentState, '/ukf/estimated_current', self._on_ukf_current, 10)
         self.create_subscription(VesselState, '/ukf/estimated_state', self._on_ukf_state, 10)
 
-        self.get_logger().info(f'rviz_node up: {len(waypoints)} waypoints, {len(self._obstacle_markers)} obstacles; '
+        self.get_logger().info(f'rviz_node up: {len(waypoints)} waypoints, {len(self._obstacle_markers)} obstacles, '
+                                f'{len(self._wall_markers)} walls, {len(self._ellipse_markers)} ellipses; '
                                 f'publishing MarkerArray on /viz/markers, telemetry on /viz/status_text')
 
     # ------------------------------------------------------------------
@@ -201,6 +232,36 @@ class RvizNode(Node):
         d = 2.0 * float(obstacle.radius)
         m.scale = Vector3(x=d, y=d, z=0.5)
         m.color = _color(0.9, 0.2, 0.2, 0.5)
+        return m
+
+    def _build_wall_marker(self, wall):
+        # Capsule (padded line segment) obstacle -- see
+        # research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md. RViz LINE_STRIP
+        # doesn't round the caps the way the solver's exact capsule distance
+        # does; this is a documented visualization-only simplification, it
+        # doesn't affect the constraint math itself.
+        m = Marker()
+        m.header.frame_id = 'map'
+        m.ns, m.id = 'walls', hash(wall.id) & 0x7FFFFFFF
+        m.type, m.action = Marker.LINE_STRIP, Marker.ADD
+        m.pose = Pose(orientation=Quaternion(w=1.0))
+        m.points = [_plot_point(wall.x0, wall.y0, 0.0), _plot_point(wall.x1, wall.y1, 0.0)]
+        m.scale = Vector3(x=2.0 * float(wall.radius), y=0.0, z=0.0)
+        m.color = _color(0.9, 0.2, 0.2, 0.5)
+        return m
+
+    def _build_ellipse_marker(self, ellipse):
+        # Elliptical obstacle -- see research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md.
+        # RViz CYLINDER supports independent x/y scale, so a/b map directly (unlike
+        # the circle marker, which sets equal x/y); orientation reuses _yaw_quat
+        # exactly as its own docstring anticipates for any world-frame angle.
+        m = Marker()
+        m.header.frame_id = 'map'
+        m.ns, m.id = 'ellipses', hash(ellipse.id) & 0x7FFFFFFF
+        m.type, m.action = Marker.CYLINDER, Marker.ADD
+        m.pose = Pose(position=_plot_point(ellipse.x, ellipse.y, 0.0), orientation=_yaw_quat(ellipse.theta))
+        m.scale = Vector3(x=2.0 * float(ellipse.a), y=2.0 * float(ellipse.b), z=0.5)
+        m.color = _color(0.6, 0.3, 0.9, 0.5)
         return m
 
     # ---- live callbacks --------------------------------------------------
@@ -250,6 +311,16 @@ class RvizNode(Node):
     def _on_obstacles(self, msg: ObstacleArray):
         self._obstacle_markers = [self._build_obstacle_marker(o) for o in msg.obstacles]
         self._obstacles_xyr = [(o.x, o.y, o.radius) for o in msg.obstacles]
+        self._publish_all()
+
+    def _on_walls(self, msg: WallObstacleArray):
+        self._wall_markers = [self._build_wall_marker(w) for w in msg.walls]
+        self._walls_xyr = [(w.x0, w.y0, w.x1, w.y1, w.radius) for w in msg.walls]
+        self._publish_all()
+
+    def _on_ellipses(self, msg: EllipseArray):
+        self._ellipse_markers = [self._build_ellipse_marker(e) for e in msg.ellipses]
+        self._ellipses_xyabtheta = [(e.x, e.y, e.a, e.b, e.theta) for e in msg.ellipses]
         self._publish_all()
 
     def _on_active_reference(self, msg: ActiveReference):
@@ -366,7 +437,11 @@ class RvizNode(Node):
         target = self._active_waypoint if self._active_waypoint is not None else self._goal
         active_wp_dist = math.hypot(ship_pos[0] - target[0], ship_pos[1] - target[1])
         nearest_obstacle_dist = min(
-            (math.hypot(ship_pos[0] - ox, ship_pos[1] - oy) - orad for ox, oy, orad in self._obstacles_xyr),
+            [math.hypot(ship_pos[0] - ox, ship_pos[1] - oy) - orad for ox, oy, orad in self._obstacles_xyr] +
+            [_point_to_segment_dist(ship_pos[0], ship_pos[1], x0, y0, x1, y1) - wrad
+             for x0, y0, x1, y1, wrad in self._walls_xyr] +
+            [_point_ellipse_distance(ship_pos[0], ship_pos[1], xc, yc, a, b, theta)
+             for xc, yc, a, b, theta in self._ellipses_xyabtheta],
             default=float('inf'))
 
         # "| <predicted>" appended straight after X/Y's actual value, from
@@ -401,7 +476,8 @@ class RvizNode(Node):
 
     # ------------------------------------------------------------------
     def _publish_all(self):
-        markers = list(self._path_markers) + list(self._obstacle_markers)
+        markers = (list(self._path_markers) + list(self._obstacle_markers) + list(self._wall_markers) +
+                   list(self._ellipse_markers))
         for m in (self._active_wp_marker, self._trail_marker, self._prediction_marker, self._ship_marker,
                   self._current_marker, self._ukf_current_marker, self._wave_marker):
             if m is not None:

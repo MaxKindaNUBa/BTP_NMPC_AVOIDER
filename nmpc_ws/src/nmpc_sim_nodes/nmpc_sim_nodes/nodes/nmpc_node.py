@@ -2,7 +2,7 @@
 /nmpc/solve, wrapping AcadosNMPC.solve() (SQP-RTI) unchanged; caches
 the latest /map/active_reference and /map/obstacles for use inside the next
 solve() call; also broadcasts the same result on three topics for passive
-consumers (viz_node, diagnostics).
+consumers (rviz_node, hud_node, diagnostics).
 
 /nmpc/solve's request.state is always the *measured* state -- mmg_node runs
 the sensor noise model (SENSOR_NOISE_MODEL.md) in-process before calling this
@@ -29,7 +29,8 @@ _pkg_paths.ensure_on_path()
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
 from nmpc_interfaces.msg import (  # noqa: E402
-    ActiveReference, ControlCommand, ControllerEffortSample, ObstacleArray, PredictionHorizon, SolverStatus,
+    ActiveReference, ControlCommand, ControllerEffortSample, EllipseArray, ObstacleArray, PredictionHorizon,
+    SegmentArray, SolverStatus, WallObstacleArray,
 )
 from nmpc_interfaces.srv import SolveNMPC  # noqa: E402
 
@@ -70,9 +71,9 @@ _SCALAR_CONFIG_FIELDS = [
     'DELTA_MIN', 'DELTA_MAX', 'DELTA_DOT_MIN', 'DELTA_DOT_MAX',
     'RPS_MIN', 'RPS_MAX', 'RPS_DOT_MIN', 'RPS_DOT_MAX',
     'U_REF', 'DELTA_TRIM', 'N_TRIM',
-    'BRAKE_DISTANCE', 'U_REF_MIN',
+    'BRAKE_DISTANCE', 'U_REF_MIN', 'WAYPOINT_PASSAGE_DIST', 'WAYPOINT_PASSAGE_XY_BOOST',
     'EPS',
-    'SIGMA', 'W_SLACK', 'OBSTACLE_START_K', 'MAX_OBSTACLES',
+    'SIGMA', 'W_SLACK', 'OBSTACLE_START_K', 'MAX_OBSTACLES', 'MAX_WALLS', 'MAX_ELLIPSES', 'SOFTMIN_K',
     'QE_SCALE',
     'ACADOS_QP_SOLVER', 'ACADOS_NLP_SOLVER', 'ACADOS_INTEGRATOR',
     'ACADOS_NUM_STAGES', 'ACADOS_NUM_STEPS',
@@ -103,6 +104,12 @@ class NmpcNode(Node):
 
         self._active_reference = None   # nmpc_interfaces.msg.ActiveReference, cached
         self._obstacles_cache = []      # list of (x, y, radius) tuples, cached
+        self._walls_cache = []          # list of (x0, y0, x1, y1, radius) tuples, cached -- see
+        # research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md
+        self._ellipses_cache = []       # list of (xc, yc, a, b, theta) tuples, cached -- same design doc
+        self._segments_cache = []       # list of (chi_p, end_x, end_y) tuples, cached -- see
+        # map_node's SegmentQueue; unlike _obstacles_cache this is expected to change every
+        # tick (segments popped as waypoints are reached), not just populate once at startup.
 
         self.control_pub = self.create_publisher(ControlCommand, '/nmpc/control_command', 10)
         self.horizon_pub = self.create_publisher(PredictionHorizon, '/nmpc/prediction_horizon', 10)
@@ -124,6 +131,9 @@ class NmpcNode(Node):
 
         self.create_subscription(ActiveReference, '/map/active_reference', self._on_active_reference, _REFERENCE_QOS)
         self.create_subscription(ObstacleArray, '/map/obstacles', self._on_obstacles, _OBSTACLES_QOS)
+        self.create_subscription(WallObstacleArray, '/map/walls', self._on_walls, _OBSTACLES_QOS)
+        self.create_subscription(EllipseArray, '/map/ellipses', self._on_ellipses, _OBSTACLES_QOS)
+        self.create_subscription(SegmentArray, '/map/active_segments', self._on_active_segments, _REFERENCE_QOS)
 
         # Own callback group + MultiThreadedExecutor so /map/active_reference
         # and /map/obstacles subscriptions can still update the cache while a
@@ -162,6 +172,15 @@ class NmpcNode(Node):
 
     def _on_obstacles(self, msg: ObstacleArray):
         self._obstacles_cache = [(o.x, o.y, o.radius) for o in msg.obstacles]
+
+    def _on_walls(self, msg: WallObstacleArray):
+        self._walls_cache = [(w.x0, w.y0, w.x1, w.y1, w.radius) for w in msg.walls]
+
+    def _on_ellipses(self, msg: EllipseArray):
+        self._ellipses_cache = [(e.x, e.y, e.a, e.b, e.theta) for e in msg.ellipses]
+
+    def _on_active_segments(self, msg: SegmentArray):
+        self._segments_cache = [(s.chi_p, s.end_x, s.end_y) for s in msg.segments]
 
     def _pack_horizon(self, result, stamp) -> PredictionHorizon:
         xi_traj = result['xi_traj']  # (STATE_DIM, N+1)
@@ -206,17 +225,23 @@ class NmpcNode(Node):
         delta, n = float(state.delta), float(state.n)
         current = (float(request.current.vx), float(request.current.vy))
 
-        if self._active_reference is not None:
+        if self._segments_cache:
+            segments = self._segments_cache
+        elif self._active_reference is not None:
+            # /map/active_segments hasn't arrived yet but /map/active_reference has
+            # (or the queue is momentarily empty) -- fall back to a degenerate
+            # single-segment list from the current leg reference.
             ref = self._active_reference
-            chi_p, x_d, y_d = ref.chi_p, ref.x_d, ref.y_d
+            segments = [(ref.chi_p, ref.x_d, ref.y_d)]
         else:
-            # startup race: /map/active_reference hasn't arrived yet -- hold the
-            # current pose as a safe placeholder target for this one call only.
+            # startup race: neither has arrived yet -- hold the current pose as a
+            # safe placeholder target for this one call only.
             self.get_logger().warn('no /map/active_reference received yet, holding current pose', throttle_duration_sec=2.0)
-            chi_p, x_d, y_d = state.psi, state.x, state.y
+            segments = [(state.psi, state.x, state.y)]
 
-        result = self.solver.solve(mmg_state, delta, n, chi_p, x_d, y_d,
-                                    obstacles=self._obstacles_cache, current=current)
+        result = self.solver.solve(mmg_state, delta, n, segments,
+                                    obstacles=self._obstacles_cache, walls=self._walls_cache,
+                                    ellipses=self._ellipses_cache, current=current)
 
         # Raw controller-effort sample: cheap numpy slicing only (arrays already
         # exist in `result`), then a non-blocking hand-off -- no metric arithmetic,

@@ -22,7 +22,7 @@ python scenario_maker/scenario_editor.py
 
 Optional flags:
 
-- `--out PATH` — where to save/load (default: `scenario_maker/scenario.json`)
+- `--out PATH` — where to save/load (default: `nmpc_sim_nodes/params/scenario.json`, the file the live sim actually reads)
 - `--load` — load an existing file at `--out` on startup instead of starting blank
 - `--sim-time` / `--u-init` — initial values for the two scalar fields (editable in the GUI too)
 

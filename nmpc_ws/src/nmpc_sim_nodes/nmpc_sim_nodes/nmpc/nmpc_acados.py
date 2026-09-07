@@ -41,20 +41,26 @@ _U_NO_UPPER_BOUND = 1e3
 from nmpc.params import DEFAULT_CONFIG
 from nmpc.state_augmentation import augmented_dynamics_casadi
 from nmpc.path_following import (
-    build_xi_full, pad_obstacles, get_reference_state, wrap180_casadi, compute_effective_u_ref,
+    build_xi_full, pad_obstacles, pad_walls, pad_ellipses, get_reference_state, wrap180_casadi,
+    build_horizon_references, capsule_distance_casadi, ellipse_distance_casadi, softmin_casadi,
 )
 
 
 def _param_vector(config):
     """Length of the runtime parameter vector p:
-    p = [chi_p, x_d, y_d, vcx, vcy, x_obs_1, y_obs_1, r_obs_1, ...]"""
-    return 5 + 3 * config.MAX_OBSTACLES
+    p = [chi_p, x_d, y_d, vcx, vcy,
+         x_obs_1, y_obs_1, r_obs_1, ...,                      (config.MAX_OBSTACLES circle slots)
+         x0_wall_1, y0_wall_1, x1_wall_1, y1_wall_1, r_wall_1, ...,  (config.MAX_WALLS capsule slots)
+         xc_ell_1, yc_ell_1, a_ell_1, b_ell_1, theta_ell_1, ...]  (config.MAX_ELLIPSES ellipse slots)
+    See research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md."""
+    return 5 + 3 * config.MAX_OBSTACLES + 5 * config.MAX_WALLS + 5 * config.MAX_ELLIPSES
 
 
 def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
     """Builds the acados OCP definition once, ahead of time (compiled to C).
     Runtime values are set later via solver.set(...) in AcadosNMPC.solve()."""
-    N, n_obs = config.N, config.MAX_OBSTACLES
+    N, n_obs, n_walls, n_ell = config.N, config.MAX_OBSTACLES, config.MAX_WALLS, config.MAX_ELLIPSES
+    n_prim = n_obs + n_walls + n_ell  # total obstacle primitives (circles + wall capsules + ellipses)
 
     # ---- model: state, control, params, and the ODE right-hand side ----
     model = AcadosModel()
@@ -68,21 +74,45 @@ def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
     x_d = p[1]
     y_d = p[2]
     current_p = p[3:5]  # [vcx, vcy], frozen over the horizon (frozen-disturbance approximation)
-    obs_p = p[5:]
+    obs_p = p[5:5 + 3 * n_obs]
+    wall_p = p[5 + 3 * n_obs:5 + 3 * n_obs + 5 * n_walls]
+    ellipse_p = p[5 + 3 * n_obs + 5 * n_walls:]
 
     model.x = xi
     model.u = u_aug
     model.p = p
     model.f_expl_expr = augmented_dynamics_casadi(xi, u_aug, chi_p, current_p)
 
-    # obstacle constraint expressions, one row per fixed obstacle slot:
-    # (x_k - x_obs_i)^2 + (y_k - y_obs_i)^2 - r_c_i^2 + s_i >= 0
-    h_list = []
+    # Obstacle avoidance: every circle/wall (capsule_distance_casadi -- a circle
+    # is the degenerate capsule p0==p1) and ellipse (ellipse_distance_casadi --
+    # an APPROXIMATE, gradient-normalized distance, see its own docstring; no
+    # closed form exists for a true point-to-ellipse distance) primitive's
+    # point-to-surface distance is aggregated via a smooth soft-min
+    # (softmin_casadi) into ONE scalar D_hat, which is always <= the true
+    # nearest-obstacle distance (safe-direction approximation, verified
+    # numerically for ellipses too). Single constraint row, single slack --
+    # see research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md for the full
+    # derivation (this replaces the old one-row-per-circle formulation).
+    d_list = []
     for i in range(n_obs):
         ox, oy, orad = obs_p[3 * i], obs_p[3 * i + 1], obs_p[3 * i + 2]
         r_c = orad + config.R_ASV
-        h_list.append((xi[IDX_X] - ox) ** 2 + (xi[IDX_Y] - oy) ** 2 - r_c ** 2)
-    model.con_h_expr = ca.vertcat(*h_list) if n_obs > 0 else ca.SX.zeros(0)
+        d_list.append(capsule_distance_casadi(xi[IDX_X], xi[IDX_Y], ox, oy, ox, oy, r_c, config.EPS))
+    for i in range(n_walls):
+        x0, y0, x1, y1, wrad = (wall_p[5 * i], wall_p[5 * i + 1], wall_p[5 * i + 2],
+                                 wall_p[5 * i + 3], wall_p[5 * i + 4])
+        r_c = wrad + config.R_ASV
+        d_list.append(capsule_distance_casadi(xi[IDX_X], xi[IDX_Y], x0, y0, x1, y1, r_c, config.EPS))
+    for i in range(n_ell):
+        xc, yc, a, b, theta = (ellipse_p[5 * i], ellipse_p[5 * i + 1], ellipse_p[5 * i + 2],
+                                ellipse_p[5 * i + 3], ellipse_p[5 * i + 4])
+        # NOTE: r_pad=config.R_ASV only (ship-only padding) -- unlike circles/walls,
+        # an ellipse's own size is already fully encoded in a/b, so no object-radius
+        # term is added here. See ellipse_distance_casadi's docstring.
+        d_list.append(ellipse_distance_casadi(xi[IDX_X], xi[IDX_Y], xc, yc, a, b, theta,
+                                               config.R_ASV, config.EPS))
+    D_hat = softmin_casadi(d_list, config.SOFTMIN_K) if n_prim > 0 else None
+    model.con_h_expr = ca.vertcat(D_hat) if n_prim > 0 else ca.SX.zeros(0)
 
     ocp = AcadosOcp()
     ocp.model = model
@@ -123,17 +153,21 @@ def build_acados_ocp(config=DEFAULT_CONFIG) -> AcadosOcp:
     ocp.cost.yref_0 = np.concatenate([yref0, np.zeros(CONTROL_DIM)])
     ocp.cost.yref_e = yref0
 
-    # ---- obstacle (soft) constraints: h >= 0, relaxable by slack down to -SIGMA ----
-    if n_obs > 0:
-        ocp.constraints.lh = np.zeros(n_obs)
-        ocp.constraints.uh = np.full(n_obs, 1e8)  # "no upper bound"; kept << ACADOS_INFTY (1e10)
-        ocp.constraints.idxsh = np.arange(n_obs)   # marks all h rows as soft (slacked)
-        ocp.cost.zl = np.zeros(n_obs)
-        ocp.cost.zu = np.zeros(n_obs)
-        ocp.cost.Zl = config.W_SLACK * np.ones(n_obs)   # quadratic slack penalty weight
-        ocp.cost.Zu = config.W_SLACK * np.ones(n_obs)
-        ocp.constraints.lsh = -config.SIGMA * np.ones(n_obs)  # max allowed relaxation
-        ocp.constraints.ush = np.zeros(n_obs)
+    # ---- obstacle (soft) constraint: single row, h = D_hat >= 0, relaxable by
+    # slack down to -SIGMA (same SIGMA/W_SLACK values as the old per-circle
+    # scheme -- only the single nearest obstacle ever bound in practice before,
+    # so this collapses cleanly without retuning). See
+    # research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md.
+    if n_prim > 0:
+        ocp.constraints.lh = np.zeros(1)
+        ocp.constraints.uh = np.full(1, 1e8)  # "no upper bound"; kept << ACADOS_INFTY (1e10)
+        ocp.constraints.idxsh = np.array([0])   # marks the h row as soft (slacked)
+        ocp.cost.zl = np.zeros(1)
+        ocp.cost.zu = np.zeros(1)
+        ocp.cost.Zl = config.W_SLACK * np.ones(1)   # quadratic slack penalty weight
+        ocp.cost.Zu = config.W_SLACK * np.ones(1)
+        ocp.constraints.lsh = -config.SIGMA * np.ones(1)  # max allowed relaxation
+        ocp.constraints.ush = np.zeros(1)
 
     # ---- state/control bounds ----
     ocp.constraints.x0 = np.array(xi_ref0)  # placeholder; overwritten every solve() call
@@ -198,6 +232,8 @@ class AcadosNMPC:
         self.N = config.N
         self.dt = config.dt
         self.n_obs = config.MAX_OBSTACLES
+        self.n_walls = config.MAX_WALLS
+        self.n_ellipses = config.MAX_ELLIPSES
 
         ocp = build_acados_ocp(config)
         json_path = os.path.join(os.path.dirname(__file__), "..", config.ACADOS_JSON_FILE)
@@ -206,37 +242,87 @@ class AcadosNMPC:
         self._last_delta = config.DELTA_TRIM  # fallback command if a solve ever fails
         self._last_n = config.N_TRIM
 
-    def solve(self, mmg_state, delta, n, chi_p, x_d, y_d, obstacles=None, current=(0.0, 0.0)):
+        # Waypoint-passage weight boost (nmpc/README.md item 9): a second,
+        # per-stage-selectable W/W_e pair with Q[x]/Q[y] scaled up, applied
+        # via acados' runtime cost_set(stage, "W", ...) -- NOT an OCP rebuild
+        # -- only to the handful of stages predicted near a waypoint crossing
+        # (build_horizon_references' dist_to_corner_arr), so it pulls the
+        # trajectory through the actual point there without raising cost
+        # anywhere else along a leg.
+        self._W_default = _block_diag(config.Q, config.R)
+        self._We_default = config.Qe
+        Q_boosted = config.Q.copy()
+        Q_boosted[IDX_X, IDX_X] *= config.WAYPOINT_PASSAGE_XY_BOOST
+        Q_boosted[IDX_Y, IDX_Y] *= config.WAYPOINT_PASSAGE_XY_BOOST
+        self._W_boosted = _block_diag(Q_boosted, config.R)
+        self._We_boosted = config.QE_SCALE * Q_boosted
+
+    def solve(self, mmg_state, delta, n, segments, obstacles=None, walls=None, ellipses=None,
+              current=(0.0, 0.0)):
+        """segments: ordered list of active path segments [(chi_p, end_x, end_y), ...]
+        -- typically SegmentQueue(...).segments -- previewed into the horizon by
+        build_horizon_references(), which may reference several upcoming segments
+        across the N=200 stages, not just one (see nmpc/README.md item 8).
+        walls: list of (x0, y0, x1, y1, radius) capsule obstacles, e.g. harbor
+        walls/quays -- see research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md.
+        ellipses: list of (xc, yc, a, b, theta) elliptical obstacles, e.g. other
+        vessels -- theta in radians, world frame; see the same design doc."""
         cfg = self.config
         if obstacles is None:
             obstacles = []
+        if walls is None:
+            walls = []
+        if ellipses is None:
+            ellipses = []
 
-        xi_0 = build_xi_full(mmg_state, delta, n, chi_p, x_d, y_d)
         obs_flat = pad_obstacles(obstacles, self.n_obs)
-        # current is set once per solve() call and held fixed across all N
-        # stages below via the per-stage "p" set loop -- the frozen-disturbance
-        # approximation (we only have a single online estimate, not a
-        # horizon-length forecast).
-        params = np.concatenate([[chi_p, x_d, y_d], current, obs_flat])  # matches _param_vector() order
+        wall_flat = pad_walls(walls, self.n_walls)
+        ellipse_flat = pad_ellipses(ellipses, self.n_ellipses)
 
-        u_ref_eff = compute_effective_u_ref(mmg_state[3], mmg_state[4], x_d, y_d, cfg.U_REF, cfg)
-        xi_ref = get_reference_state(chi_p, x_d, y_d, u_ref_eff, cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
-        # xi_ref (unwrapped, psi row = chi_p) is kept as-is for the return dict below
-        # (controller-effort logging); acados' own NONLINEAR_LS cost needs the
-        # separate psi-zeroed copy instead (wrapped residual baked into cost_y_expr).
-        xi_ref_cost = _yref_wrap_psi(xi_ref)
-        yref = np.concatenate([xi_ref_cost, np.zeros(CONTROL_DIM)])
+        # speed_est: coarse forward-walk speed used only to decide which segment
+        # each stage's predicted arclength position falls into -- recomputed fresh
+        # every solve() call from the ship's own current surge speed (floored to
+        # avoid a blown-up ETA near-zero speed), so it self-corrects each tick
+        # (receding-horizon fashion) rather than needing to be precise.
+        speed_est = max(abs(float(mmg_state[0])), 0.1)
+        chi_p_arr, x_d_arr, y_d_arr, u_ref_arr, dist_to_corner_arr = build_horizon_references(
+            mmg_state[3], mmg_state[4], segments, self.N, self.dt, speed_est, cfg.U_REF, cfg)
+        passage_mask = dist_to_corner_arr <= cfg.WAYPOINT_PASSAGE_DIST
+
+        xi_0 = build_xi_full(mmg_state, delta, n, chi_p_arr[0], x_d_arr[0], y_d_arr[0])
 
         # pin the initial state to the actual current state (standard MPC shrinking-horizon setup)
         self.solver.set(0, "lbx", xi_0)
         self.solver.set(0, "ubx", xi_0)
 
-        # push the same reference/parameters into every stage of the horizon
+        # push each stage's OWN segment reference/parameters -- current is set once
+        # per solve() call and held fixed across all N stages (the frozen-disturbance
+        # approximation: we only have a single online estimate, not a horizon-length
+        # forecast), but chi_p/x_d/y_d/u_ref now vary per stage via the arrays above.
+        # xi_ref (unwrapped, psi row = chi_p, stage k=0) is kept for the return dict
+        # below (controller-effort logging: "reference used in this solve's stage
+        # cost") -- acados' own NONLINEAR_LS cost needs the separate psi-zeroed copy
+        # instead (wrapped residual baked into cost_y_expr).
+        xi_ref = None
         for k in range(self.N):
-            self.solver.set(k, "yref", yref)
-            self.solver.set(k, "p", params)
-        self.solver.set(self.N, "yref", xi_ref_cost)
-        self.solver.set(self.N, "p", params)
+            xi_ref_k = get_reference_state(chi_p_arr[k], x_d_arr[k], y_d_arr[k], u_ref_arr[k],
+                                            cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
+            if k == 0:
+                xi_ref = xi_ref_k
+            yref_k = np.concatenate([_yref_wrap_psi(xi_ref_k), np.zeros(CONTROL_DIM)])
+            params_k = np.concatenate([[chi_p_arr[k], x_d_arr[k], y_d_arr[k]], current, obs_flat, wall_flat,
+                                        ellipse_flat])
+            self.solver.set(k, "yref", yref_k)
+            self.solver.set(k, "p", params_k)
+            self.solver.cost_set(k, "W", self._W_boosted if passage_mask[k] else self._W_default)
+
+        xi_ref_N = get_reference_state(chi_p_arr[self.N], x_d_arr[self.N], y_d_arr[self.N], u_ref_arr[self.N],
+                                        cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
+        params_N = np.concatenate([[chi_p_arr[self.N], x_d_arr[self.N], y_d_arr[self.N]], current, obs_flat,
+                                    wall_flat, ellipse_flat])
+        self.solver.set(self.N, "yref", _yref_wrap_psi(xi_ref_N))
+        self.solver.set(self.N, "p", params_N)
+        self.solver.cost_set(self.N, "W", self._We_boosted if passage_mask[self.N] else self._We_default)
 
         t0 = time.perf_counter()
         status = self.solver.solve()  # one SQP-RTI iteration; internal iterate persists across calls (warm start)

@@ -30,11 +30,9 @@ setup(
             'nmpc_node = nmpc_sim_nodes.nodes.nmpc_node:main',
             'mmg_node = nmpc_sim_nodes.nodes.mmg_node:main',
             'ukf_node = nmpc_sim_nodes.nodes.ukf_node:main',
-            'viz_node = nmpc_sim_nodes.nodes.viz_node:main',
             'rviz_node = nmpc_sim_nodes.nodes.rviz_node:main',
             'hud_node = nmpc_sim_nodes.nodes.hud_node:main',
             'logger_node = nmpc_sim_nodes.nodes.logger_node:main',
-            'run_demo = nmpc_sim_nodes.run_demo:main',
             # command names unchanged -- only the module path moved, into tests/
             'test_nmpc = nmpc_sim_nodes.tests.test_nmpc:main',
             'test_sensor_model = nmpc_sim_nodes.sensor_model.test_sensor_model:main',
@@ -43,6 +41,8 @@ setup(
             'test_closed_loop_env = nmpc_sim_nodes.tests.test_closed_loop_env:main',
             'test_ukf = nmpc_sim_nodes.tests.test_ukf:main',
             'tune_ukf = nmpc_sim_nodes.tests.tune_ukf:main',
+            'test_capsule_distance = nmpc_sim_nodes.tests.test_capsule_distance:main',
+            'test_ellipse_distance = nmpc_sim_nodes.tests.test_ellipse_distance:main',
         ],
     },
 )
