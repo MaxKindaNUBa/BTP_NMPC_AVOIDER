@@ -20,7 +20,7 @@ nmpc_ws/install/
 nmpc_ws/log/
 
 # Copyrighted reference papers (cited by title/DOI in research_papers/README.md instead)
-research_papers/*.pdf
+research_papers/
 
 # Raw AI coding-assistant chat history exports (internal working notes, not project source)
 md/
