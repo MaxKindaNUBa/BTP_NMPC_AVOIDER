@@ -78,6 +78,9 @@ class MmgNode(Node):
         self.declare_parameter('use_ukf', False)
         self.use_ukf = bool(self.get_parameter('use_ukf').value)
 
+        self.declare_parameter('current_aware', True)
+        self.current_aware = bool(self.get_parameter('current_aware').value)
+
         self.plant_step = make_casadi_integrator(self.dt, method='rk4', sym_type=ca.SX, with_env=True)
         self.accel_fn = make_casadi_accel_function(sym_type=ca.SX)
 
@@ -353,10 +356,15 @@ class MmgNode(Node):
 
         request = SolveNMPC.Request()
         request.state = ukf_response.estimated_state if (self.use_ukf and ukf_ok) else true_msg
-        # Current feedforward is always on, independent of use_ukf (which only
-        # picks the *state* source above): UKF's estimate when enabled/healthy,
-        # otherwise the true current already sampled this tick.
-        request.current = ukf_response.estimated_current if (self.use_ukf and ukf_ok) else current_msg
+        if self.current_aware:
+            request.current = ukf_response.estimated_current if (self.use_ukf and ukf_ok) else current_msg
+        else:
+            request.current = CurrentState()
+            request.current.vx = 0.0
+            request.current.vy = 0.0
+            request.current.speed = 0.0
+            request.current.heading = 0.0
+            request.current.enabled = False
 
         response = self._call_sync(self.solve_client, request)
         if response is None:

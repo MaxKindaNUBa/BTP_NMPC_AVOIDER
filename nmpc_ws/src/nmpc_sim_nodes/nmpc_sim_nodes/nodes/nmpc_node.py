@@ -164,6 +164,9 @@ class NmpcNode(Node):
         overrides['ACADOS_CODE_EXPORT_DIR'] = self.get_parameter('ACADOS_CODE_EXPORT_DIR').value
         overrides['ACADOS_JSON_FILE'] = self.get_parameter('ACADOS_JSON_FILE').value
 
+        self.declare_parameter('current_aware', True)
+        self.current_aware = bool(self.get_parameter('current_aware').value)
+
         return dataclasses.replace(DEFAULT_CONFIG, **overrides)
 
     # ------------------------------------------------------------------
@@ -223,7 +226,7 @@ class NmpcNode(Node):
         state = request.state  # already the measured state -- see module docstring
         mmg_state = [state.u, state.v, state.r, state.x, state.y, state.psi]
         delta, n = float(state.delta), float(state.n)
-        current = (float(request.current.vx), float(request.current.vy))
+        current = (float(request.current.vx), float(request.current.vy)) if getattr(self, 'current_aware', True) else (0.0, 0.0)
 
         if self._segments_cache:
             segments = self._segments_cache

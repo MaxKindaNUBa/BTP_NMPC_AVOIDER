@@ -112,7 +112,11 @@ def run_closed_loop(nmpc: AcadosNMPC, scenario: dict, current_model, wave_model)
     delta, n = float(cfg.DELTA_TRIM), float(cfg.N_TRIM)
 
     waypoints = [tuple(wp) for wp in scenario["waypoints"]]
-    obstacles = [tuple(o) for o in scenario.get("obstacles", [])]
+    # (x, y, radius) only -- scenario.json rows may carry trailing (vx, vy) since
+    # obstacles gained an optional velocity attribute (see scenario_editor.py's
+    # Velocity mode); the solver's obstacle constraint never reads velocity, same
+    # discipline nmpc_node.py's _on_obstacles applies to live topic data.
+    obstacles = [tuple(o[:3]) for o in scenario.get("obstacles", [])]
     last_idx = len(waypoints) - 1
     target_idx = 1
     wp_radius = cfg.WP_RADIUS
@@ -162,7 +166,7 @@ def plot_comparison(scenario: dict, logs: dict, out_path: str):
     wp_y = [w[1] for w in waypoints]
     ax.plot(wp_y, wp_x, "g--", marker="x", markersize=8, linewidth=1, label="scenario waypoints")
 
-    for ox, oy, orad in scenario.get("obstacles", []):
+    for ox, oy, orad, *_ in scenario.get("obstacles", []):
         ax.add_patch(plt.Circle((oy, ox), orad, color="tab:orange", alpha=0.3))
 
     for label, _, _, color in _SCENARIOS:

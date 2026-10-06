@@ -60,10 +60,10 @@ def MMG_Time_Derivative_casadi(state, control, current=(0.0, 0.0), wave_force=(0
 
     if smooth:
         u_val = ca.fmax(u, 0.00001)
-        rps_val = ca.fmax(rps, 1.0)
+        rps_val = ca.fmax(rps, 0.1)
     else:
         u_val = ca.if_else(u <= 0, 0.00001, u)
-        rps_val = ca.if_else(rps <= 0, 1.0, rps)
+        rps_val = ca.if_else(rps <= 0.1, 0.1, rps)
 
     # Current: earth-frame (vcx, vcy) -> body-frame (uc, vc) via the state's
     # own psi, then relative velocity (ur, vr) substituted for (u_val, v) in

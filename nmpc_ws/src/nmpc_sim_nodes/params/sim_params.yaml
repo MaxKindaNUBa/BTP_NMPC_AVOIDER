@@ -24,12 +24,12 @@ mmg_node:
     # false == pass through, i.e. exactly the no-noise behavior the sim had
     # before this was folded in. There is no partial-disable mode; false
     # removes ALL of it.
-    sensor_enabled: true
+    sensor_enabled: false
     # "light": SENSOR_NOISE_MODEL.md section 4 placeholder values.
     # "sbg_ellipse_n": derived from the real SBG Systems Ellipse-N GNSS-aided
     # INS datasheet -- see sensor_model/config.py's SBG_ELLIPSE_N for the full
     # provenance/derivation. MUST match ukf_node.sensor_preset below.
-    sensor_preset: "sbg_ellipse_n"
+    sensor_preset: "light"
     sensor_seed: 314         # one run == one seed, for reproducible noise trajectories
 
     # true: /nmpc/solve's request.state is populated from ukf_node's estimate.
@@ -39,33 +39,36 @@ mmg_node:
     # ukf_node always runs and is always logged/published regardless of this
     # flag, so its estimate stays available for observability either way).
     use_ukf: false
+    # Current-awareness in NMPC: if true, NMPC prediction model receives estimated/true
+    # current (vcx, vcy); if false, NMPC assumes zero current (vcx=0, vcy=0).
+    current_aware: true
     # Current/wave disturbance (formerly env_node): WAVE_CURRENT_DISTURBANCE_PLAN.md,
     # sampled in-process on every tick and fed into the plant integrator only --
     # the NMPC's own prediction model never sees it. Independent toggles.
-    current_enabled: false        # independent toggle
-    current_mean_speed: 0.2       # [m/s]
-    current_mean_heading: -0.2     # [rad], earth-fixed, same convention as psi
+    current_enabled: true        # independent toggle
+    current_mean_speed: 0.1       # [m/s]
+    current_mean_heading: -0.9     # [rad], earth-fixed, same convention as psi
     # [s] Gauss-Markov Tc -- larger == slower wandering. 800s was arbitrary;
     # this vessel is a nearshore ASV (~1-2km from shoreline), where real current
     # variability is wind-driven (few-hour, superinertial response; storm-surge
     # currents ~half-day) plus tidal (deterministic, not OU, but same order --
     # M2 semidiurnal ~12.4h period) -- see research discussion, sourced from
     # nearshore current-meter/HF-radar literature. 21600s (6h) sits in that
-    # range and stays >>1 order of magnitude above sensor_model's psi/r
+    # range and stays >>1 order of magnitude aboveokay sensor_model's psi/r
     # Gauss-Markov bias tau (300s), so a UKF/observer can't easily alias one
     # into the other -- unlike the old 800s value, which was close enough to
     # that 300s bias tau to make the two statistically hard to separate. 21600, 0.000019
     current_time_constant: 21600.0
     current_sigma: 0.000019          # [m/s per sqrt(s)] driving noise intensity
-    current_seed: 341
+    current_seed: 324
 
     wave_enabled: true           # independent toggle
     wave_hs: 4.0                  # [m] significant wave height, scaled-model units
     wave_tp: 3.0                  # [s] peak period
     wave_gamma: 3.3                # JONSWAP peak-enhancement factor (3.3 = standard North Sea fit)
     wave_mean_heading: 0.2        # [rad] earth-fixed mean wave direction
-    wave_num_components: 30       # spectral discretization for Newman's approximation
-    wave_seed: 408
+    wave_num_components: 40       # spectral discretization for Newman's approximation
+    wave_seed: 546
 
 ukf_node:
   ros__parameters:
@@ -286,6 +289,7 @@ ukf_node:
 
 nmpc_node:
   ros__parameters:
+    current_aware: true
     N: 400
     dt: 0.1   # MUST match mmg_node.dt above
     LPP: 2.902
@@ -296,7 +300,7 @@ nmpc_node:
     DELTA_DOT_MIN: -0.5235987755982988  # -30 deg/s [rad/s]
     DELTA_DOT_MAX: 0.5235987755982988   # +30 deg/s [rad/s]
 
-    RPS_MIN: -18.2
+    RPS_MIN: 0.1
     RPS_MAX: 18.2
     RPS_DOT_MIN: -5.0
     RPS_DOT_MAX: 5.0
@@ -327,13 +331,13 @@ nmpc_node:
     # thing that actually discourages a large violation is this quadratic
     # penalty weight, so it must be large enough that plowing through is
     # always costlier than a real detour.
-    W_SLACK: 5000.0
+    W_SLACK: 500000.0
     OBSTACLE_START_K: 1
     MAX_OBSTACLES: 20   # MUST be >= map_node.max_obstacles below
-    MAX_WALLS: 5        # MUST be >= map_node.max_walls below -- wall (capsule)
+    MAX_WALLS: 10        # MUST be >= map_node.max_walls below -- wall (capsule)
                          # obstacle slots, e.g. harbor walls/quays/breakwaters;
                          # see research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md
-    MAX_ELLIPSES: 5      # MUST be >= map_node.max_ellipses below -- elliptical
+    MAX_ELLIPSES: 10      # MUST be >= map_node.max_ellipses below -- elliptical
                          # obstacle slots, e.g. other vessels; same design doc
     # Soft-min sharpness (1/m) aggregating every circle+wall+ellipse distance
     # into nmpc_acados.py's single obstacle constraint row. Higher = tighter
@@ -360,7 +364,7 @@ nmpc_node:
     # R_DIAG indices follow u_aug (CONTROL_DIM=2, see nmpc/config.py IDX_DDELTA/IDX_DN):
     #   [0] delta_dot  rudder rate [rad/s]
     #   [1] n_dot      propeller rate [rps/s]
-    R_DIAG: [0.11, 0.11]
+    R_DIAG: [0.01, 0.01]
     QE_SCALE: 2.0
 
     # Waypoint-passage weight boost (nmpc/README.md item 9): near a waypoint
@@ -397,6 +401,20 @@ map_node:
     max_obstacles: 20   # MUST match nmpc_node.MAX_OBSTACLES above
     max_walls: 5         # MUST match nmpc_node.MAX_WALLS above
     max_ellipses: 5       # MUST match nmpc_node.MAX_ELLIPSES above
+
+    # 1st-order Nomoto gain/time-constant used ONLY for the frozen-rudder
+    # future-horizon prediction map_node publishes for a live obstacle ship
+    # (see nmpc/nomoto_obstacle.py, nmpc/README.md's "Planned: Nomoto-driven
+    # moving obstacles") -- never consumed by the solver, and independent of
+    # obstacle_ship_node's own true MMG dynamics below. Rough starting guess,
+    # not fitted against this hull's actual turning-circle response.
+    obstacle_ship_nomoto_k: 0.15    # [1/s] steady turn rate per unit rudder angle
+    obstacle_ship_nomoto_t: 3.0     # [s] time constant
+
+obstacle_ship_node:
+  ros__parameters:
+    dt: 0.1   # MUST match mmg_node.dt above -- the second (keyboard-driven)
+              # ship's own MMG plant integration step
 
 logger_node:
   ros__parameters:

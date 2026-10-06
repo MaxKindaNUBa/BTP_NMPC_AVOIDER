@@ -24,8 +24,9 @@ _pkg_paths.ensure_on_path()
 from nmpc.config import IDX_X, IDX_Y  # noqa: E402
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
-from nmpc_interfaces.msg import (ActiveReference, CurrentState, EllipseArray, ObstacleArray,  # noqa: E402
-                                  PredictionHorizon, SimStatus, VesselState, WaveState, WallObstacleArray)
+from nmpc_interfaces.msg import (ActiveReference, CurrentState, Ellipse, EllipseArray, Obstacle,  # noqa: E402
+                                  ObstacleArray, PredictedPathArray, PredictionHorizon, SimStatus, VesselState,
+                                  WallObstacle, WaveState, WallObstacleArray)
 from nmpc_interfaces.srv import GetScenario  # noqa: E402
 from rviz_2d_overlay_msgs.msg import OverlayText  # noqa: E402
 
@@ -53,6 +54,8 @@ _SHIP_WIDTH = 0.7 * _SHIP_LENGTH * 0.25
 _CURRENT_ARROW_GAIN = 20.0
 _WAVE_ARROW_GAIN = 40.0
 _MIN_ARROW_LENGTH = 0.3
+
+_VELOCITY_EPS = 1e-9  # below this speed [m/s], treat an obstacle/wall/ellipse as stationary
 
 
 def _color(r, g, b, a=1.0):
@@ -147,9 +150,25 @@ class RvizNode(Node):
         waypoints = list(zip(scenario.waypoints_x, scenario.waypoints_y))
 
         self._path_markers = self._build_path_markers(waypoints)
-        self._obstacle_markers = [self._build_obstacle_marker(o) for o in scenario.obstacles]
-        self._wall_markers = [self._build_wall_marker(w) for w in scenario.walls]
-        self._ellipse_markers = [self._build_ellipse_marker(e) for e in scenario.ellipses]
+        # Original (scenario-authored / latest-published) msg objects, keyed implicitly
+        # by list order -- id (e.g. "obs_3") is what actually ties an obstacle/wall/
+        # ellipse to its /map/predicted_paths entry (see _rebuild_obstacle_markers).
+        # A stationary one (vx=vy=0.0) never gets a predicted-path entry at all, so it
+        # just renders at its own x/y forever, same as before vx/vy existed.
+        self._obstacles_msgs = list(scenario.obstacles)
+        self._walls_msgs = list(scenario.walls)
+        self._ellipses_msgs = list(scenario.ellipses)
+        # Kept entirely SEPARATE from _ellipses_msgs/_ellipse_markers/_ellipses_xyabtheta
+        # on purpose -- an obstacle ship must never feed the HUD's nearest-obstacle
+        # readout (it isn't a real, avoidable obstacle -- see this feature's plan).
+        self._obstacle_ship_specs = list(scenario.obstacle_ships)
+        self._live_pos = {}  # id -> (x, y, psi_or_None), latest k=0 point from /map/predicted_paths
+        self._obstacle_markers = []
+        self._wall_markers = []
+        self._ellipse_markers = []
+        self._obstacle_ship_markers = []
+        self._predicted_path_markers = []
+        self._rebuild_obstacle_markers()  # builds the lists above from _obstacles_msgs et al.
         self._ship_marker = None
         self._trail_marker = None
         self._prediction_marker = None
@@ -165,11 +184,10 @@ class RvizNode(Node):
         self._ukf_state_msg = None      # latest /ukf/estimated_state, for status_overlay's x/y "| predicted" column
 
         # cached, used by the /viz/status_text telemetry block (mirrors visualizer.py's info_text)
+        # -- self._obstacles_xyr/_walls_xyr/_ellipses_xyabtheta are (re)populated by
+        # _rebuild_obstacle_markers() above, using LIVE positions when available.
         self._goal = waypoints[-1]
         self._active_waypoint = None
-        self._obstacles_xyr = [(o.x, o.y, o.radius) for o in scenario.obstacles]
-        self._walls_xyr = [(w.x0, w.y0, w.x1, w.y1, w.radius) for w in scenario.walls]
-        self._ellipses_xyabtheta = [(e.x, e.y, e.a, e.b, e.theta) for e in scenario.ellipses]
 
         # clear any markers left over from a previous run/session before publishing fresh ones
         clear = Marker()
@@ -183,6 +201,7 @@ class RvizNode(Node):
         self.create_subscription(ObstacleArray, '/map/obstacles', self._on_obstacles, _LATCHED_QOS)
         self.create_subscription(WallObstacleArray, '/map/walls', self._on_walls, _LATCHED_QOS)
         self.create_subscription(EllipseArray, '/map/ellipses', self._on_ellipses, _LATCHED_QOS)
+        self.create_subscription(PredictedPathArray, '/map/predicted_paths', self._on_predicted_paths, _REFERENCE_QOS)
         self.create_subscription(ActiveReference, '/map/active_reference', self._on_active_reference, _REFERENCE_QOS)
         self.create_subscription(SimStatus, '/map/sim_status', self._on_sim_status, _LATCHED_QOS)
         self.create_subscription(CurrentState, '/env/current_state', self._on_current_state, 10)
@@ -190,9 +209,12 @@ class RvizNode(Node):
         self.create_subscription(CurrentState, '/ukf/estimated_current', self._on_ukf_current, 10)
         self.create_subscription(VesselState, '/ukf/estimated_state', self._on_ukf_state, 10)
 
+        n_moving = sum(1 for o in self._obstacles_msgs if math.hypot(o.vx, o.vy) > _VELOCITY_EPS) + \
+            sum(1 for w in self._walls_msgs if math.hypot(w.vx, w.vy) > _VELOCITY_EPS) + \
+            sum(1 for e in self._ellipses_msgs if math.hypot(e.vx, e.vy) > _VELOCITY_EPS)
         self.get_logger().info(f'rviz_node up: {len(waypoints)} waypoints, {len(self._obstacle_markers)} obstacles, '
-                                f'{len(self._wall_markers)} walls, {len(self._ellipse_markers)} ellipses; '
-                                f'publishing MarkerArray on /viz/markers, telemetry on /viz/status_text')
+                                f'{len(self._wall_markers)} walls, {len(self._ellipse_markers)} ellipses '
+                                f'({n_moving} moving); publishing MarkerArray on /viz/markers, telemetry on /viz/status_text')
 
     # ------------------------------------------------------------------
     def _fetch_scenario(self) -> GetScenario.Response:
@@ -264,6 +286,105 @@ class RvizNode(Node):
         m.color = _color(0.6, 0.3, 0.9, 0.5)
         return m
 
+    def _build_predicted_path_marker(self, path_id, xs, ys):
+        m = Marker()
+        m.header.frame_id = 'map'
+        m.ns, m.id = 'predicted_paths', hash(path_id) & 0x7FFFFFFF
+        m.type, m.action = Marker.LINE_STRIP, Marker.ADD
+        m.scale = Vector3(x=0.2, y=0.0, z=0.0)
+        m.color = _color(1.0, 0.85, 0.1, 0.85)  # amber, distinct from the wall/obstacle red
+        m.points = [_plot_point(x, y) for x, y in zip(xs, ys)]
+        return m
+
+    def _live_xy(self, obj_id, default_x, default_y):
+        pos = self._live_pos.get(obj_id)
+        return (pos[0], pos[1]) if pos is not None else (default_x, default_y)
+
+    def _live_xyp(self, obj_id, default_x, default_y, default_psi):
+        pos = self._live_pos.get(obj_id)
+        if pos is None:
+            return default_x, default_y, default_psi
+        x, y, psi = pos
+        return x, y, (psi if psi is not None else default_psi)
+
+    def _build_obstacle_ship_markers(self):
+        """Obstacle ships (see this feature's plan): rendered with the same
+        _build_ellipse_marker() helper as a real ellipse, but tracked in a
+        SEPARATE list/method so they can never leak into
+        _ellipse_markers/_ellipses_xyabtheta (the HUD's nearest-obstacle
+        readout) -- an obstacle ship isn't a real, avoidable obstacle. Live
+        (x, y, psi) comes from self._live_pos (populated by
+        _on_predicted_paths's "obstacle_ship_0" entry); a spec with no live
+        entry yet (obstacle_ship_node hasn't published /obstacle_ship/state
+        yet) just renders at its scenario-authored initial pose.
+
+        Nudged UP in z (0.5 -> 0.9) after the whole point of this feature is
+        "let it pass through any other object" -- a moving ship WILL end up
+        spatially overlapping a real obstacle/wall/ellipse (all rendered as
+        flat, semi-transparent CYLINDERs at the SAME z=0.5), and two coplanar
+        transparent surfaces at an identical height is a textbook GPU
+        z-fighting setup: the renderer picks a winner per pixel per frame
+        near-arbitrarily, which looks exactly like flickering/flashing as the
+        ship moves through/near one. Separating the z bands (never touching,
+        since real obstacles' own CYLINDER height is 0.5 centered at z=0.5,
+        i.e. spanning z in [0.25, 0.75]) removes the coplanar overlap
+        entirely -- a rendering-only change, doesn't touch collision/avoidance
+        (there is none) or any position/orientation data."""
+        markers = []
+        for spec in self._obstacle_ship_specs:
+            x, y, psi = self._live_xyp(spec.id, spec.x, spec.y, spec.psi0)
+            e = Ellipse(id=spec.id, x=x, y=y, a=spec.a, b=spec.b, theta=psi, vx=0.0, vy=0.0)
+            m = self._build_ellipse_marker(e)
+            m.pose.position.z = 0.9
+            markers.append(m)
+        return markers
+
+    def _rebuild_obstacle_markers(self):
+        """Rebuilds obstacle/wall/ellipse markers (and the HUD's nearest-
+        obstacle xyr/xyabtheta caches) from the latest scenario-authored
+        msgs, substituting each one's LIVE position from self._live_pos
+        (populated by _on_predicted_paths) when it has one -- i.e. any with
+        nonzero vx/vy. A stationary one (vx=vy=0.0, the common case) has no
+        entry in self._live_pos and renders at its own x/y unchanged, exactly
+        as before vx/vy existed. Reuses _build_obstacle_marker/_build_wall_
+        marker/_build_ellipse_marker UNCHANGED by passing translated copies
+        of the msg objects -- for a wall, translated relative to its own
+        midpoint (both endpoints move by the same delta, since a moving wall
+        translates rigidly). Called whenever either the static obstacle/wall/
+        ellipse topics OR /map/predicted_paths tick -- does NOT publish
+        itself, callers call self._publish_all() after."""
+        obstacle_markers, obstacles_xyr = [], []
+        for o in self._obstacles_msgs:
+            x, y = self._live_xy(o.id, o.x, o.y)
+            o2 = Obstacle(id=o.id, x=x, y=y, radius=o.radius, vx=o.vx, vy=o.vy)
+            obstacle_markers.append(self._build_obstacle_marker(o2))
+            obstacles_xyr.append((x, y, o.radius))
+        self._obstacle_markers = obstacle_markers
+        self._obstacles_xyr = obstacles_xyr
+
+        wall_markers, walls_xyr = [], []
+        for w in self._walls_msgs:
+            mx0, my0 = (w.x0 + w.x1) / 2.0, (w.y0 + w.y1) / 2.0
+            lx, ly = self._live_xy(w.id, mx0, my0)
+            dx, dy = lx - mx0, ly - my0
+            w2 = WallObstacle(id=w.id, x0=w.x0 + dx, y0=w.y0 + dy, x1=w.x1 + dx, y1=w.y1 + dy,
+                               radius=w.radius, vx=w.vx, vy=w.vy)
+            wall_markers.append(self._build_wall_marker(w2))
+            walls_xyr.append((w2.x0, w2.y0, w2.x1, w2.y1, w2.radius))
+        self._wall_markers = wall_markers
+        self._walls_xyr = walls_xyr
+
+        ellipse_markers, ellipses_xyabtheta = [], []
+        for e in self._ellipses_msgs:
+            x, y = self._live_xy(e.id, e.x, e.y)
+            e2 = Ellipse(id=e.id, x=x, y=y, a=e.a, b=e.b, theta=e.theta, vx=e.vx, vy=e.vy)
+            ellipse_markers.append(self._build_ellipse_marker(e2))
+            ellipses_xyabtheta.append((x, y, e.a, e.b, e.theta))
+        self._ellipse_markers = ellipse_markers
+        self._ellipses_xyabtheta = ellipses_xyabtheta
+
+        self._obstacle_ship_markers = self._build_obstacle_ship_markers()
+
     # ---- live callbacks --------------------------------------------------
     def _on_mmg_state(self, msg: VesselState):
         self._last_vessel = (msg.x, msg.y, msg.psi)
@@ -309,18 +430,32 @@ class RvizNode(Node):
         self._publish_all()
 
     def _on_obstacles(self, msg: ObstacleArray):
-        self._obstacle_markers = [self._build_obstacle_marker(o) for o in msg.obstacles]
-        self._obstacles_xyr = [(o.x, o.y, o.radius) for o in msg.obstacles]
+        self._obstacles_msgs = list(msg.obstacles)
+        self._rebuild_obstacle_markers()
         self._publish_all()
 
     def _on_walls(self, msg: WallObstacleArray):
-        self._wall_markers = [self._build_wall_marker(w) for w in msg.walls]
-        self._walls_xyr = [(w.x0, w.y0, w.x1, w.y1, w.radius) for w in msg.walls]
+        self._walls_msgs = list(msg.walls)
+        self._rebuild_obstacle_markers()
         self._publish_all()
 
     def _on_ellipses(self, msg: EllipseArray):
-        self._ellipse_markers = [self._build_ellipse_marker(e) for e in msg.ellipses]
-        self._ellipses_xyabtheta = [(e.x, e.y, e.a, e.b, e.theta) for e in msg.ellipses]
+        self._ellipses_msgs = list(msg.ellipses)
+        self._rebuild_obstacle_markers()
+        self._publish_all()
+
+    def _on_predicted_paths(self, msg: PredictedPathArray):
+        # Ticks every /mmg/state step (see map_node.py's _publish_predicted_paths) --
+        # only obstacles/walls/ellipses with nonzero velocity appear here at all
+        # (map_node skips stationary ones entirely). Each path's first point (k=0)
+        # is that obstacle's LIVE current position (a wall's own midpoint) -- see
+        # nmpc/moving_obstacle.py. Rebuilding self._live_pos wholesale each tick is
+        # correct here since the SET of moving ids never changes mid-run (velocities
+        # are fixed at scenario-authoring time).
+        self._live_pos = {p.id: (p.x[0], p.y[0], (p.psi[0] if p.psi else None)) for p in msg.paths if p.x}
+        self._predicted_path_markers = [self._build_predicted_path_marker(p.id, p.x, p.y)
+                                         for p in msg.paths if p.x]
+        self._rebuild_obstacle_markers()
         self._publish_all()
 
     def _on_active_reference(self, msg: ActiveReference):
@@ -477,7 +612,8 @@ class RvizNode(Node):
     # ------------------------------------------------------------------
     def _publish_all(self):
         markers = (list(self._path_markers) + list(self._obstacle_markers) + list(self._wall_markers) +
-                   list(self._ellipse_markers))
+                   list(self._ellipse_markers) + list(self._obstacle_ship_markers) +
+                   list(self._predicted_path_markers))
         for m in (self._active_wp_marker, self._trail_marker, self._prediction_marker, self._ship_marker,
                   self._current_marker, self._ukf_current_marker, self._wave_marker):
             if m is not None:

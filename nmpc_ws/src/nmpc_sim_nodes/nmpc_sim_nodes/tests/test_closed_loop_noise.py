@@ -140,7 +140,8 @@ def run_closed_loop(nmpc: AcadosNMPC, scenario: dict, sensor_model, ukf: Unscent
         ukf.reset(np.array([*mmg_state, vcx0, vcy0, 0.0, 0.0, 0.0, 0.0], dtype=float))
 
     waypoints = [tuple(wp) for wp in scenario["waypoints"]]
-    obstacles = [tuple(o) for o in scenario.get("obstacles", [])]
+    # (x, y, radius) only -- see test_closed_loop_env.py's identical comment
+    obstacles = [tuple(o[:3]) for o in scenario.get("obstacles", [])]
     last_idx = len(waypoints) - 1
     target_idx = 1
     wp_radius = cfg.WP_RADIUS
@@ -211,7 +212,7 @@ def plot_comparison(scenario: dict, log_clean: dict, log_noisy: dict, out_path: 
     wp_y = [w[1] for w in waypoints]
     ax.plot(wp_y, wp_x, "g--", marker="x", markersize=8, linewidth=1, label="scenario waypoints")
 
-    for ox, oy, orad in scenario.get("obstacles", []):
+    for ox, oy, orad, *_ in scenario.get("obstacles", []):
         ax.add_patch(plt.Circle((oy, ox), orad, color="tab:orange", alpha=0.3))
 
     ax.plot(log_clean["y"], log_clean["x"], "k-", linewidth=1.6,

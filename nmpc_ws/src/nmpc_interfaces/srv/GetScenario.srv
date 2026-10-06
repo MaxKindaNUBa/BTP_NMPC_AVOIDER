@@ -5,4 +5,5 @@ float64[] waypoints_y
 Obstacle[] obstacles
 WallObstacle[] walls
 Ellipse[] ellipses
+ObstacleShipSpec[] obstacle_ships
 float64 sim_time_fixed

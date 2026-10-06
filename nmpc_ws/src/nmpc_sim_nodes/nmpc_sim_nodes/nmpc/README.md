@@ -91,6 +91,176 @@ fairly modest current speed — confirmed via `nmpc_sim_nodes/tests/test_closed_
 does not cause this; only current does, since only current has a channel
 into the OCP's own dynamics that can go missing.
 
+## Planned: Nomoto-driven moving obstacles (design note — NOT implemented yet)
+
+Two-stage rollout for making circle/ellipse obstacles behave like real ships
+(1st-order Nomoto steering + a heading-command layer) instead of the current
+constant-velocity (CV) extrapolation. **Neither stage introduces COLREGS
+logic** — no DCPA/TCPA cost term, no give-way/stand-on role, no encounter
+classification; that is explicitly deferred (see
+`research_papers/COLREGS_AWARE_NMPC_MOVING_OBSTACLES.md` sections 5-9, which
+already separates COLREGS-specific reasoning from the base moving-obstacle
+mechanism this note covers). Wall obstacles are out of scope for Nomoto motion
+— they have no heading to turn, and stay on today's CV/rigid-translation path
+untouched.
+
+### Baseline this plan builds on
+
+- `vx`/`vy` already exist on `Obstacle`/`WallObstacle`/`Ellipse` (see
+  `nmpc/moving_obstacle.py`) as a pure-NumPy, CV-only, **visualization-only**
+  feature: `map_node.py`'s `_publish_predicted_paths()` extrapolates
+  `origin + t*v` every `/mmg/state` tick onto `/map/predicted_paths`
+  (`PredictedPathArray`: per-obstacle `id`, `x[]`, `y[]` — no heading field),
+  and `rviz_node.py`'s `_rebuild_obstacle_markers()` overlays each obstacle's
+  live position from that topic onto otherwise-static markers.
+- `nmpc_node.py`'s `_on_obstacles`/`_on_walls`/`_on_ellipses` callbacks
+  already strip velocity before caching (`(o.x, o.y, o.radius)` etc.), and
+  `map_node.py` only publishes the LATCHED `/map/obstacles`/`/map/ellipses`
+  topics once at startup (never republished as an obstacle moves) — so
+  **every** obstacle's position is already frozen at its scenario-authored
+  origin as far as `nmpc_acados.py`'s solve-time obstacle cache is concerned,
+  moving or not. This is why Stage 1 below gets NMPC-inertness for free
+  rather than needing a new precaution.
+- `nmpc_acados.py`'s `solve()` builds `obs_flat`/`wall_flat`/`ellipse_flat`
+  ONCE per `solve()` call (outside the `for k in range(self.N)` loop) and
+  reuses the identical flat array for every stage `k` — i.e. even a CV-moving
+  obstacle is currently treated as frozen at its live position for the
+  *entire* prediction horizon, not just up to `t=0`. This is the concrete gap
+  Stage 2 closes.
+
+### Stage 1 — Nomoto kinematics, init + visualize only, NMPC pipeline inert
+
+1. **New motion model module** (e.g. `nmpc/nomoto_obstacle.py`, pure NumPy,
+   no CasADi — same constraint `moving_obstacle.py` already documents, since
+   this stays out of the solver entirely): per-obstacle state
+   `(x, y, psi, u, r)`, stepped each tick by
+   - 1st-order Nomoto: `r_dot = (-r + K*delta_cmd) / T`
+   - kinematic position update: `x_dot = u*cos(psi)`, `y_dot = u*sin(psi)`
+     (constant `u`, no sway — adequate for an obstacle proxy; see the
+     turning-circle/inertia discussion this note follows from)
+   - a thin heading-command layer on top of raw Nomoto, since Nomoto only
+     maps rudder angle to yaw rate, not "when to turn": a simple heading
+     autopilot, `delta_cmd = clip(Kp*wrap(psi_cmd - psi) - Kd*r, DELTA_MIN,
+     DELTA_MAX)`, driven by a scripted `psi_cmd` schedule (constant heading,
+     or a short list of `(trigger_time, new_heading)` entries for something
+     like "hold course, then turn once").
+2. **Scenario schema**: add motion params as a separate, optional,
+   id-keyed block (e.g. `"obstacle_motion": {"obs_0": {"psi0":..., "u0":...,
+   "K":..., "T":..., "heading_schedule":[...]}}`) rather than more positional
+   tuple fields on `obstacles`/`ellipses` — keeps the existing
+   `(x,y,r,vx,vy)`/`(xc,yc,a,b,theta,vx,vy)` shapes and `_pad_row` padding
+   untouched, and an obstacle with no entry in this block keeps today's
+   CV `vx`/`vy` behavior exactly as-is (fully backward compatible with every
+   existing `scenario.json`).
+3. **`map_node.py` wiring**: instantiate one motion-model instance per
+   opted-in id at startup (seeded from the obstacle/ellipse's own initial
+   `x, y` plus the motion block's `psi0, u0`); step it by `DEFAULT_CONFIG.dt`
+   inside the same `_on_mmg_state` tick that already drives
+   `_publish_predicted_paths(t)`; that method's per-obstacle live position
+   comes from the motion-model instance's current `(x, y)` instead of
+   `origin + t*v` for an opted-in id. The predicted future path (`k=0..N`)
+   can stay a simple straight-line CV extrapolation from the CURRENT
+   `(x, y, u*cos(psi), u*sin(psi))` — heading/rate frozen for the prediction
+   window only, the same simplification already flagged in
+   `moving_obstacle.py`'s growing-margin discussion, not a new caveat.
+4. **`PredictedPath.msg` needs a new field**: `float64[] psi` (empty for a
+   CV-only producer, length `N+1` matching `x[]`/`y[]` for a Nomoto-driven
+   one) — the only way for `rviz_node.py` to actually show an ellipse
+   rotating to face its direction of travel, which is the whole point of
+   adding yaw-rate. Without this, `_build_ellipse_marker` has no live heading
+   to draw with; it would keep using the scenario-authored static `theta`
+   forever, exactly like today.
+5. **`rviz_node.py` changes**: extend `self._live_pos`'s values from
+   `(x, y)` to `(x, y, psi_or_None)`, and have `_rebuild_obstacle_markers()`'s
+   ellipse branch substitute the live `psi` for `theta` when present
+   (falling back to the scenario-authored `theta`, unchanged, when the
+   `PredictedPath` entry carries no `psi` — i.e. every existing CV/static
+   obstacle). No changes needed for the obstacle-existence/topic-wiring side
+   — `/map/predicted_paths` already generically covers "any obstacle with
+   something to predict," regardless of which motion model produced it.
+6. **`scenario_editor.py` GUI**: a new mode alongside `Velocity` (e.g.
+   `Nomoto`) — select an obstacle/ellipse, fill `U0`/`K`/`T`/target heading
+   fields, "Apply Nomoto" writes into the new `obstacle_motion` scenario
+   block. A single target heading (one commanded turn) is enough for a first
+   cut; a full multi-turn schedule editor is a stretch goal, not required to
+   "initialize and view" per the current ask.
+7. **Tests to add**: a `test_nomoto_obstacle_prediction.py` unit test
+   (mirrors `test_moving_obstacle_prediction.py`'s shape) checking the
+   Nomoto+autopilot rollout converges to a commanded heading with the
+   expected time constant `T`, plus a manual rviz check that an ellipse
+   visibly rotates to face its turn.
+8. **Explicit non-change**: `nmpc_node.py`/`nmpc_acados.py` are touched by
+   NONE of the above — see "Baseline" above for why that's automatic, not
+   something Stage 1 has to defend against.
+
+### Stage 2 — feed moving obstacles into the NMPC's own avoidance constraint (still no COLREGS)
+
+This is exactly the mechanism `research_papers/COLREGS_AWARE_NMPC_MOVING_OBSTACLES.md`
+section 2 already scopes theoretically: a **stage-varying** obstacle
+parameter instead of the one-shared-value-per-horizon pattern Stage 1 (and
+today's CV feature) both leave untouched. Concretely:
+
+1. `nmpc_acados.py`'s `solve()` loop must build `obs_flat`/`ellipse_flat`
+   **per stage `k`** (moving `pad_obstacles(...)`/`pad_ellipses(...)` inside
+   the `for k in range(self.N)` loop, called with each moving obstacle's
+   *predicted* position at stage `k`, not its live position repeated `N+1`
+   times) — walls stay outside this loop, unchanged, since they're excluded
+   from Nomoto motion entirely (a CV-moving wall, if one ever exists, would
+   need the same per-stage treatment, but that's not part of this plan).
+2. The solver needs each moving obstacle's own `(N+1)`-length predicted
+   trajectory, not just its live `(x, y)`. Two ways to get it, worth deciding
+   explicitly before implementing:
+   - (a) `nmpc_node.py` re-simulates the Nomoto model forward `N` steps
+     itself from the last known `(x, y, psi, u, r)` + `K`/`T`/heading-command
+     state (needs that state published somewhere `nmpc_node` can cache it,
+     e.g. a new topic from `map_node`), avoiding any dependency on
+     `/map/predicted_paths`'s own cadence/staleness.
+   - (b) `map_node.py` (which already owns the Nomoto instances) publishes
+     the full `(N+1)`-point rollout itself, and `nmpc_node` just consumes it
+     — reuses Stage 1's `_publish_predicted_paths` machinery directly, but
+     ties the solver's obstacle avoidance to `/map/predicted_paths`'s publish
+     timing/QoS, which was designed for visualization, not control.
+   (a) keeps the solver's obstacle input on the same footing as its own
+   dynamics model (self-contained, no cross-node staleness); (b) reuses more
+   code. Worth a real decision before writing either.
+3. **Growing safety margin with `k`** (`research_papers/...md` section 3):
+   since a moving obstacle's predicted position is only as good as the CV/
+   Nomoto extrapolation, and error compounds further into the horizon, the
+   effective obstacle radius fed into `capsule_distance_casadi`/
+   `ellipse_distance_casadi` at stage `k` should grow with `k`
+   (`moving_obstacle.py`'s existing `growing_radius()` helper already exists
+   for exactly this, just never wired into the solver yet). Recommended to
+   add in this stage, not deferred — a moving obstacle's stage-`k` position
+   is strictly less certain than a static one's, which today's formulation
+   has no way to express.
+4. `MAX_OBSTACLES`/`MAX_ELLIPSES` slot counts and the `softmin_casadi`
+   aggregation are unchanged — a moving obstacle still occupies one ordinary
+   slot, just with per-stage-varying coordinates instead of constant ones.
+5. **Explicitly out of scope for Stage 2**: any DCPA/TCPA cost term,
+   give-way/stand-on role assignment, or encounter-geometry classification —
+   this stage only makes the existing distance-based soft constraint aware
+   that the obstacle moves; it does not make the ship behave like a
+   COLREGS-compliant vessel around it.
+6. **Validation plan**: a unit test asserting the per-stage `obs_flat`/
+   `ellipse_flat` values fed to the solver match the Nomoto model's own
+   independently-computed rollout at each `k`; a closed-loop scenario test
+   (mirrors `test_closed_loop_env.py`'s shape) with one Nomoto-driven
+   obstacle crossing the ownship's path, checking for both no collision and
+   no regression on the existing static-obstacle closed-loop tests.
+
+### Open decisions before implementing
+
+- Stage 2's obstacle-prediction ownership (map_node vs. nmpc_node — see 2
+  above).
+- Whether `growing_radius()`'s growth rate needs to be a new
+  `sim_params.yaml` tunable (analogous to `SIGMA`/`W_SLACK`) or can start
+  hardcoded and get promoted later.
+- `OBSTACLE_START_K` (`sim_params.yaml`) is declared and threaded into
+  `NMPCConfig` but never read anywhere inside `nmpc_acados.py`'s actual
+  build/solve path today — a pre-existing dead parameter, unrelated to this
+  plan but worth resolving (either wire it in or remove it) before Stage 2
+  adds more obstacle-timing logic on top.
+
 ## Bugs found and fixed along the way
 
 These are recorded here because they're the kind of thing that will bite
