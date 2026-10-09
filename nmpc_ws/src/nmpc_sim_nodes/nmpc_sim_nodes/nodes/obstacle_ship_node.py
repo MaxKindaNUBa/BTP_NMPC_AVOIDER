@@ -27,14 +27,8 @@ from .. import _pkg_paths
 
 _pkg_paths.ensure_on_path()
 
-import casadi as ca  # noqa: E402
-from casadi_mmg_solver.casadi_mmg import make_casadi_integrator  # noqa: E402
-
+from nmpc.nomoto_obstacle import step as nomoto_step  # noqa: E402
 from nmpc_interfaces.msg import ControlCommand, SimStatus, VesselState  # noqa: E402
-
-from env_model.config import load_current_config, load_wave_config  # noqa: E402
-from env_model.current_model import CurrentModel  # noqa: E402
-from env_model.wave_model import WaveModel  # noqa: E402
 
 _LATCHED_QOS = QoSProfile(
     depth=1,
@@ -49,27 +43,21 @@ class ObstacleShipNode(Node):
         super().__init__('obstacle_ship_node')
 
         self.declare_parameter('dt', 0.1)
+        self.declare_parameter('obstacle_ship_nomoto_k', 0.15)
+        self.declare_parameter('obstacle_ship_nomoto_t', 3.0)
+
         self.dt = float(self.get_parameter('dt').value)
+        self.K = float(self.get_parameter('obstacle_ship_nomoto_k').value)
+        self.T = float(self.get_parameter('obstacle_ship_nomoto_t').value)
 
-        self.plant_step = make_casadi_integrator(self.dt, method='rk4', sym_type=ca.SX, with_env=True)
-
-        # Same sim_params.yaml mmg_node.current_*/wave_* section (and seeds) the
-        # ownship's own mmg_node.py reads -- own model INSTANCES (not shared
-        # objects, not consumed via /env/current_state|wave_state, which are
-        # already resolved for the ownship's own heading/state) so this ship's
-        # disturbance is correctly evaluated at ITS OWN state while still being
-        # "the same sea state" by construction (same config, same seed).
-        sim_params = _pkg_paths.load_sim_params()['mmg_node']['ros__parameters']
-        self._current_enabled = bool(sim_params['current_enabled'])
-        self._wave_enabled = bool(sim_params['wave_enabled'])
-        self.current_model = CurrentModel(load_current_config()) if self._current_enabled else None
-        self.wave_model = WaveModel(load_wave_config(), self.dt) if self._wave_enabled else None
-
-        self.mmg_state = None   # np.ndarray[6] = [u, v, r, x, y, psi], None until seeded
+        self.x = 0.0
+        self.y = 0.0
+        self.psi = 0.0
+        self.u = 0.0
+        self.r = 0.0
         self.delta = 0.0
-        self.n = 0.0
         self._cmd_delta = 0.0
-        self._cmd_n = 0.0
+        self._cmd_u = 0.0
         self._have_initial_state = False
         self._running = False
 
@@ -83,56 +71,64 @@ class ObstacleShipNode(Node):
         self.timer = self.create_timer(self.dt, self._tick)
 
         self.get_logger().info(
-            f'obstacle_ship_node up, dt={self.dt}s, current_enabled={self._current_enabled}, '
-            f'wave_enabled={self._wave_enabled}, waiting for /map/obstacle_ship_initial_state '
-            f'(no-op if this scenario has no enabled obstacle ship)...')
+            f'obstacle_ship_node up, dt={self.dt}s, Nomoto K={self.K}, T={self.T}s (no env disturbance). '
+            'Waiting for /map/obstacle_ship_initial_state...')
 
     # ------------------------------------------------------------------
     def _on_initial_state(self, msg: VesselState):
         if self._have_initial_state:
             return
-        self.mmg_state = np.array([msg.u, msg.v, msg.r, msg.x, msg.y, msg.psi], dtype=float)
-        self.delta, self.n = float(msg.delta), float(msg.n)
-        self._cmd_delta, self._cmd_n = self.delta, self.n
+        self.x = float(msg.x)
+        self.y = float(msg.y)
+        self.psi = float(msg.psi)
+        self.u = float(msg.u)
+        self.r = float(msg.r)
+        self.delta = float(msg.delta)
+        self._cmd_delta = self.delta
+        self._cmd_u = self.u
         self._have_initial_state = True
-        self.get_logger().info(f'seeded obstacle ship initial state: {self.mmg_state.tolist()}')
+        self.get_logger().info(
+            f'seeded obstacle ship initial state: pos=({self.x:.2f}, {self.y:.2f}), '
+            f'psi={self.psi:.3f} rad, u={self.u:.3f} m/s')
 
     def _on_sim_status(self, msg: SimStatus):
         self._running = (msg.status == SimStatus.RUNNING)
 
     def _on_cmd(self, msg: ControlCommand):
-        # Absolute targets, applied verbatim -- same "no clamping at the plant"
-        # contract mmg_node.py has for the NMPC's own response; clamping is the
-        # commander's job (obstacle_ship_teleop_node.py today).
-        self._cmd_delta, self._cmd_n = float(msg.delta), float(msg.n)
+        if not self._have_initial_state:
+            self.get_logger().warn(
+                'Received /obstacle_ship/cmd, but no obstacle has velocity in this scenario! '
+                'Give an obstacle a velocity in scenario_editor to make it active.',
+                throttle_duration_sec=5.0)
+            return
+        self._cmd_delta = float(msg.delta)
+        if msg.n >= 0.0:
+            self._cmd_u = float(msg.n)
 
     def _state_msg(self) -> VesselState:
         msg = VesselState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
-        msg.u, msg.v, msg.r, msg.x, msg.y, msg.psi = [float(v) for v in self.mmg_state]
+        msg.u = float(self.u)
+        msg.v = 0.0
+        msg.r = float(self.r)
+        msg.x = float(self.x)
+        msg.y = float(self.y)
+        msg.psi = float(self.psi)
         msg.delta = float(self.delta)
-        msg.n = float(self.n)
+        msg.n = float(self.u)
         return msg
 
     def _tick(self):
         if not self._have_initial_state or not self._running:
             return
 
-        self.delta, self.n = self._cmd_delta, self._cmd_n
+        self.delta = self._cmd_delta
+        self.u = self._cmd_u
 
-        if self.current_model is not None:
-            vx, vy = self.current_model.step(self.dt)
-        else:
-            vx, vy = 0.0, 0.0
-        if self.wave_model is not None:
-            fx, fy, fn = self.wave_model.force(float(self.mmg_state[5]))
-        else:
-            fx, fy, fn = 0.0, 0.0, 0.0
-
-        next_state, _ = self.plant_step(ca.DM(self.mmg_state), ca.DM([self.delta, self.n]),
-                                         ca.DM([vx, vy]), ca.DM([fx, fy, fn]))
-        self.mmg_state = np.array(next_state).flatten()
+        self.x, self.y, self.psi, self.r = nomoto_step(
+            self.x, self.y, self.psi, self.u, self.r, self.delta,
+            self.K, self.T, self.dt)
 
         self.state_pub.publish(self._state_msg())
 
@@ -144,7 +140,8 @@ def main(args=None):
         rclpy.spin(node)
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

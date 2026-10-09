@@ -44,18 +44,16 @@ small scaled model, `Lpp = 2.902 m`) that can:
    error, at a commanded speed.
 2. Slow down and settle near the final waypoint instead of sailing straight
    through it.
-3. (Not yet complete — see [Current status](#current-status-and-open-work))
-   detect and steer around obstacles using LiDAR-style point/circle
-   representations, without ever making the underlying optimization
-   problem infeasible.
+3. Detect and steer around obstacles using unified soft-min distance
+   constraints covering circular obstacles, wall capsules, ellipses, and
+   moving obstacle ships, without making the underlying optimization problem
+   infeasible.
 4. Run all of the above in real time on modest hardware, using a
    receding-horizon Nonlinear Model Predictive Controller.
 
 Everything in this repo up to the current commit implements and validates
-(1) and (2) in simulation, with the formulation already structured to support
-(3) — the obstacle-avoidance terms exist in both solvers and are exercised in
-the live-visualization test harness with an empty obstacle list, but haven't
-yet been driven through a scenario with real obstacles.
+(1), (2), and (3) in simulation, with both static and moving obstacles fully
+integrated into scenario definitions, plant simulation, and real-time solving.
 
 ## Why it's built this way
 
@@ -434,26 +432,30 @@ number but not itself committed to this repo):
 nmpc_ws/
   src/
     nmpc_interfaces/            Shared msg/srv definitions for the sim's ROS2 node graph
-    nmpc_sim_nodes/              map_node, nmpc_node, ukf_node, mmg_node -- the
+    nmpc_sim_nodes/              map_node, nmpc_node, ukf_node, mmg_node, logger_node,
+                                  obstacle_ship_node, obstacle_ship_teleop_node -- the
                                   simulation graph -- plus rviz_node / hud_node
                                   (independently launchable live visualizers).
                                   Also contains the actual controller/model
                                   code, physically moved in here as subpackages:
       nmpc_sim_nodes/nodes/                   The ROS2 node entry points themselves:
                                                 map_node, nmpc_node, ukf_node, mmg_node,
-                                                rviz_node, hud_node, logger_node
-                                                (executable names unchanged, only the
-                                                module path moved here).
-      nmpc_sim_nodes/tests/                    Standalone (no live ROS graph needed)
-                                                comparison/validation harnesses:
+                                                logger_node, obstacle_ship_node,
+                                                obstacle_ship_teleop_node, rviz_node,
+                                                hud_node.
+      nmpc_sim_nodes/tests/                    Standalone comparison/validation harnesses
+                                                and benchmarking orchestrators:
                                                 test_nmpc, test_closed_loop_noise,
                                                 test_closed_loop_env, test_ukf,
-                                                tune_ukf -- see their own module
-                                                docstrings. (test_sensor_model and
-                                                test_env_model stay colocated with
-                                                sensor_model/ and env_model/ instead,
-                                                the standard "unit test next to its
-                                                module" convention.)
+                                                tune_ukf, test_capsule_distance,
+                                                test_ellipse_distance,
+                                                test_moving_obstacle_prediction,
+                                                nmpc_ablation_runs,
+                                                current_awareness__advantage.
+                                                (test_sensor_model and test_env_model
+                                                stay colocated with sensor_model/ and
+                                                env_model/ instead, the standard "unit
+                                                test next to its module" convention.)
       nmpc_sim_nodes/nmpc/                    The NMPC controller (both solvers) -- see
                                                 its own README, linked above
       nmpc_sim_nodes/casadi_mmg_solver/       CasADi symbolic MMG port + acados SimSolver
@@ -475,6 +477,10 @@ nmpc_ws/
     scenario_maker/               GUI for authoring custom track & obstacle scenarios
     mmg_model_validation/         Standalone NumPy vs CasADi vs acados validation harness
                                     (Preliminary_func.py, validate_casadi.py)
+    rviz_2d_overlay_plugins/      Vendored ROS2 plugins for 2D RViz overlays:
+                                    rviz_2d_overlay_msgs (OverlayText.msg) and
+                                    rviz_2d_overlay_plugins (TextOverlay display,
+                                    string_to_overlay_text node)
 
 Wave_Data/                    Wave-drift force lookup tables (.mat)
 research_papers/              Citations for the papers the NMPC is adapted from, plus
@@ -493,34 +499,51 @@ duplicating that detail.
 ## Available executables
 
 Every `ros2 run <package> <executable>` currently defined in `nmpc_ws/src/`,
-kept in sync with each package's `setup.py` whenever an executable is
-added/removed/renamed:
+kept in sync with each package's `setup.py` / `CMakeLists.txt` whenever an
+executable is added/removed/renamed:
 
 | Package | Executable | What it does |
 |---|---|---|
-| `nmpc_sim_nodes` | `map_node` | Owns scenario data, active-waypoint bookkeeping, and run-termination logic; part of the core sim graph. |
-| `nmpc_sim_nodes` | `nmpc_node` | Pure NMPC optimizer, serving `/nmpc/solve` (acados or CasADi backend). Receives whatever state `mmg_node` populates the request with -- the true state, or `ukf_node`'s estimate, depending on `mmg_node`'s `use_ukf` toggle (see below); this node itself has no opinion on which. |
-| `nmpc_sim_nodes` | `ukf_node` | Unscented Kalman Filter state estimator, serving `/ukf/estimate` -- called synchronously by `mmg_node` every tick. Reconstructs `[u,v,r,x,y,psi]` and estimates earth-frame current `[vcx,vcy]` from `mmg_node`'s GPS/gyro/IMU-accel sensor stream (no direct velocity measurement -- see `sensor_model` below). Always runs and publishes `/ukf/estimated_state`/`/ukf/estimated_current` for logging/RViz regardless of `mmg_node`'s `use_ukf` toggle; **the current estimate IS fed into the NMPC's own prediction model** (via `mmg_node`'s `/nmpc/solve` request, when `use_ukf=True` -- see [The NMPC formulation](#the-nmpc-formulation)), though the estimate's own accuracy is independent of that -- most of this project's UKF tuning work concerns accuracy, not this wiring. `q_diag`/`p0_diag` for the current and sensor-bias states are derived live from `sim_params.yaml`'s actual `current_sigma`/`current_time_constant`/`sensor_preset` (`ukf/config.py`'s `current_noise_diag()`/`bias_noise_diag()`), not hardcoded literals, so they can't silently go stale when those change. |
-| `nmpc_sim_nodes` | `mmg_node` | Plant integrator and the master `1/dt` clock. Also owns, in-process (no separate nodes): a toggleable GPS/compass/gyro/IMU-accelerometer/actuator noise model (`sensor_enabled`, default off/light preset) applied before every `/ukf/estimate` call, and a toggleable current (Ornstein-Uhlenbeck) + wave (JONSWAP + Newman's-approximation drift force) disturbance model (`current_enabled`/`wave_enabled`) folded into the plant integrator -- current (not wave) is additionally forwarded into `/nmpc/solve`'s request from `ukf_node`'s own estimate, so the NMPC's own dynamics also account for it (see [The NMPC formulation](#the-nmpc-formulation)). `use_ukf` (`mmg_node.py`'s own `declare_parameter` default is `False`; `sim_params.yaml` currently sets it `true`) selects whether `/nmpc/solve`'s request comes from `ukf_node`'s estimate or the true state directly. |
-| `nmpc_sim_nodes` | `logger_node` | Synchronous experiment logger; captures metadata, scenario copy, timeseries telemetry CSV, prediction horizons NPZ, and summary JSON, plus (via `ControllerEffortLogger`, fed off `nmpc_node`'s `/nmpc/controller_effort_raw` topic on its own background thread) a per-step Q/R cost breakdown and control-effort diagnostics in `costs_errors.csv`, folded into the same run's `summary.json`. Automatically launched with `bringup.launch.py`. |
-| `nmpc_sim_nodes` | `rviz_node` | Republishes the sim's own topics as `visualization_msgs/MarkerArray` so RViz2 can render the same simulation, plus two `OverlayText` HUDs (bottom-left `SHIP STATUS`, top-right `CURRENT`/`WAVE`). Both current-related lines and `SHIP STATUS`'s `X`/`Y` show `actual \| predicted` (from `/ukf/estimated_current`/`/ukf/estimated_state`) on the same line, no new rows; a 2nd arrow marker (`ukf_current`, distinct color) renders the predicted current at the ship's position alongside the actual-current arrow. Run via `rviz_hud.launch.py` below, not usually standalone. |
-| `nmpc_sim_nodes` | `hud_node` | Standalone matplotlib companion window (current compass, wave-force scatter, NMPC control-horizon graph); run alongside `rviz_node`/RViz2 (see `rviz_hud.launch.py` below). Current compass shows a 2nd-needle `actual \| predicted` overlay for `ukf_node`'s predicted current. |
-| `nmpc_sim_nodes` | `test_nmpc` | Closed-loop NMPC validation harness, no obstacles; produces plots under `~/nmpc_sim_logs/test_nmpc_results/`. |
-| `nmpc_sim_nodes` | `test_sensor_model` | Standalone true-vs-measured comparison for `mmg_node`'s sensor noise model (GPS/compass/gyro/IMU-accel -- no u,v); no other node needs to be running. Produces plots/CSVs under `~/nmpc_sim_logs/test_sensor_model_results/`. |
-| `nmpc_sim_nodes` | `test_closed_loop_noise` | Standalone headless run of the full pipeline (acados NMPC + MMG plant integrator, WITH current/wave from `sim_params.yaml` in the true plant AND fed into the solver exactly like `mmg_node`/`nmpc_node` do live) on `scenario.json`, twice -- once with no noise (true state straight into NMPC), once with the light noise preset filtered through a `UnscentedKalmanFilter` before reaching NMPC -- at accelerated (unthrottled) speed. Prints true-vs-UKF-estimated position RMSE and saves a path-comparison plot (true, UKF-filtered-true, and UKF-estimated trajectories) under `~/nmpc_sim_logs/test_closed_loop_noise_results/` -- the most direct standalone read on what a live `bringup.launch.py` run's x/y tracking looks like. |
-| `nmpc_sim_nodes` | `test_env_model` | Standalone unit-level check of `env_model`'s `CurrentModel`/`WaveModel`, no ROS graph or plant integrator needed. Produces plots under `~/nmpc_sim_logs/test_env_model_results/`. |
-| `nmpc_sim_nodes` | `test_closed_loop_env` | Standalone headless run of the full pipeline (acados NMPC + MMG plant integrator) on `scenario.json`, four times -- no disturbance, wave only, current only, and current+wave (each using `env_model`'s default `CurrentModel`/`WaveModel`, with matching seeds so each disturbance's marginal effect is isolated) -- at accelerated (unthrottled) speed. Produces a single 4-path comparison plot under `~/nmpc_sim_logs/test_closed_loop_env_results/`. |
-| `nmpc_sim_nodes` | `test_ukf` | Standalone unit-level true-vs-estimated comparison for `ukf.ukf_core.UnscentedKalmanFilter` (state + estimated current) against `sim_params.yaml`'s own current/wave config, no ROS graph needed -- drives a constant-rudder **turning circle** maneuver (not a zig-zag; see item 12 in [the development timeline](#development-timeline-and-what-actually-went-wrong) for why), reads `sim_params.yaml`'s own `q_diag`/`r_diag`/`p0_diag`/`alpha`/`beta`/`kappa` (via `ukf.config.load_ukf_config()`), so this is the harness to rerun after touching any of them. Also prints a current-vs-"never updates from its seed" null-baseline RMSE comparison, since a low absolute current RMSE alone doesn't prove the filter is sensing anything when the true current barely moves. Produces plots (a single combined `state_xy.png` plan-view trajectory instead of separate x/y time series; angle states unwrapped so a multi-revolution turning circle doesn't look broken) and an RMSE summary under `~/nmpc_sim_logs/test_ukf_results/`. |
-| `nmpc_sim_nodes` | `tune_ukf` | Automated NEES-consistency Q/R search for the UKF (Nelder-Mead over per-group scale factors; see its own module docstring), reusing `test_ukf`'s turning-circle maneuver/env models. "current" (vcx/vcy) is deliberately excluded from the search -- NEES can't distinguish genuine uncertainty from Q inflated to paper over misattributed error, which previously drove `q_diag[vcx]/[vcy]` to ~7147x its physically-correct value. `accel_bias`/`pos_bias` groups ARE searched, but their result now has to be applied as `sim_params.yaml`'s `accel_bias_q_scale`/`pos_bias_q_scale` (a multiplier on `ukf/config.py`'s live-derived physical value), not as an absolute `q_diag` entry -- **verify with `test_ukf`'s RMSE, not this search's NEES output, before trusting a new scale**; NEES-optimal and RMSE-optimal aren't the same thing, and previous rounds of this search found scales that measurably hurt point accuracy. Prints suggested values for `sim_params.yaml`; does not write them automatically. Produces a NEES comparison plot under `~/nmpc_sim_logs/tune_ukf_results/`. |
-| `scenario_maker` | `scenario_editor` | GUI for authoring custom start/waypoints/goal/obstacle scenarios, saved as `scenario.json`. |
-| `mmg_model_validation` | `validate_casadi` | Cross-validates NumPy vs CasADi vs acados MMG dynamics on the project's standard turning-circle maneuver. |
+| `nmpc_sim_nodes` | `map_node` | Owns scenario data, active-waypoint bookkeeping, track-line geometry, static/moving obstacle publishing (`/map/obstacles`, `/map/walls`, `/map/ellipses`, `/map/predicted_paths`), and run-termination logic (`/map/sim_status`); part of the core sim graph. |
+| `nmpc_sim_nodes` | `nmpc_node` | Pure NMPC optimizer, serving `/nmpc/solve` (acados SQP-RTI or CasADi IPOPT backend). Receives whatever state `mmg_node` populates the request with -- the true state, or `ukf_node`'s estimate, depending on `mmg_node`'s `use_ukf` toggle; publishes `/nmpc/prediction_horizon` and `/nmpc/controller_effort_raw`. |
+| `nmpc_sim_nodes` | `ukf_node` | Unscented Kalman Filter state estimator, serving `/ukf/estimate` -- called synchronously by `mmg_node` every tick. Reconstructs `[u,v,r,x,y,psi]` and estimates earth-frame current `[vcx,vcy]` from `mmg_node`'s GPS/gyro/IMU-accel sensor stream (no direct velocity measurement). Always publishes `/ukf/estimated_state` and `/ukf/estimated_current`; **the current estimate IS fed into the NMPC's own prediction model** (via `mmg_node`'s `/nmpc/solve` request when `use_ukf=True`). Noise models are derived live from `sim_params.yaml`. |
+| `nmpc_sim_nodes` | `mmg_node` | Plant integrator and the master `1/dt` clock. Integrates 3-DOF MMG dynamics. Also owns, in-process: a toggleable sensor noise model (`sensor_enabled`, light preset) before `/ukf/estimate`, and a toggleable current (OU process) + wave (JONSWAP + Newman drift) disturbance model (`current_enabled`/`wave_enabled`) folded into the plant integrator and published on `/env/current_state` and `/env/wave_state`. Current estimate from `ukf_node` is forwarded to `/nmpc/solve`. |
+| `nmpc_sim_nodes` | `logger_node` | Synchronous experiment logger; captures metadata, scenario copy, timeseries telemetry CSV, prediction horizons NPZ, and summary JSON, plus (via `ControllerEffortLogger`, fed off `/nmpc/controller_effort_raw`) per-step Q/R cost breakdowns and control effort diagnostics in `costs_errors.csv`. Launched with `bringup.launch.py`. |
+| `nmpc_sim_nodes` | `obstacle_ship_node` | True-physics MMG plant for a second, independently controlled moving obstacle vessel. Integrates the exact same CasADi MMG dynamics and environmental disturbance models (current + wave, evaluated for its own heading and state) as the ownship. Listens for commands on `/obstacle_ship/cmd` and publishes state on `/obstacle_ship/state`. Idles safely if the active scenario does not specify an obstacle ship. |
+| `nmpc_sim_nodes` | `obstacle_ship_teleop_node` | Interactive keyboard (WASD) teleoperation node for `obstacle_ship_node` via raw terminal I/O (termios/cbreak). Commands rudder (`a`/`d`, rate-limited) and propeller speed (`w`/`s`, rate-limited), holding last commanded values when idle. Publishes `/obstacle_ship/cmd` (`ControlCommand`). |
+| `nmpc_sim_nodes` | `rviz_node` | Republishes the simulation state as `visualization_msgs/MarkerArray` on `/viz/markers` (ownship hull, waypoint path, active waypoint, prediction horizon, circular obstacles, wall capsules, ellipses, moving obstacle ships, and predicted future trajectories), plus two `OverlayText` HUDs (bottom-left `/viz/status_overlay`, top-right `/viz/env_overlay`). Displays `actual \| predicted` telemetry and current arrows. |
+| `nmpc_sim_nodes` | `hud_node` | Standalone Matplotlib companion window (current compass, wave-force scatter, NMPC control-horizon graph); run alongside `rviz_node`/RViz2 (see `rviz_hud.launch.py`). Current compass displays a dual-needle `actual \| predicted` overlay for UKF current estimates. |
+| `rviz_2d_overlay_plugins` | `string_to_overlay_text` | C++ ROS2 utility node from the vendored overlay plugin package; subscribes to any `std_msgs/String` topic and republishes as `rviz_2d_overlay_msgs/OverlayText` for rendering directly in RViz. |
+| `nmpc_sim_nodes` | `nmpc_ablation_runs` | Automated test orchestrator and multi-seed benchmarking analysis script for the 5-case disturbance ablation study (Baseline calm water, Current only, Waves only, Sensor noise only, Combined disturbances). Generates absolute and normalized terminal/text tables (`ablation_table.txt`), representative median trajectory plots (`ablation_paths.png`), animated GIFs (`ablation_animation.gif`), and archives (`ablation_results.npz`). Supports `--scavenge` and `--num-runs`. |
+| `nmpc_sim_nodes` | `current_awareness__advantage` | Test orchestrator and analysis script comparing Current-Aware NMPC (ocean current estimate fed to prediction model) vs. Current-Unaware NMPC (current assumed zero). Produces path comparison maps (`current_awareness_paths.png`), animated GIFs (`current_awareness_animation.gif`), heading/course/crab angle time-series (`heading_and_crab_angle_comparison.png`), and terminal summary tables. (Also aliased as `current_awareness_advantage`). |
+| `nmpc_sim_nodes` | `test_nmpc` | Closed-loop NMPC validation suite exercising path-following, straight-line tracking, offset starts, waypoint turns, obstacle avoidance, and heading recovery; produces plots under `~/nmpc_sim_logs/test_nmpc_results/`. |
+| `nmpc_sim_nodes` | `test_sensor_model` | Standalone true-vs-measured comparison for `mmg_node`'s sensor noise model (GPS/compass/gyro/IMU-accel -- no u,v); no other node needed. Produces plots/CSVs under `~/nmpc_sim_logs/test_sensor_model_results/`. |
+| `nmpc_sim_nodes` | `test_closed_loop_noise` | Standalone headless run of the full pipeline (acados NMPC + MMG plant integrator, with current/wave in the true plant and fed into the solver) on `scenario.json`, twice -- without noise vs with UKF-filtered noise -- at accelerated speed. Produces path-comparison plots under `~/nmpc_sim_logs/test_closed_loop_noise_results/`. |
+| `nmpc_sim_nodes` | `test_env_model` | Standalone unit-level check of `env_model`'s `CurrentModel`/`WaveModel`, no ROS graph needed. Produces plots under `~/nmpc_sim_logs/test_env_model_results/`. |
+| `nmpc_sim_nodes` | `test_closed_loop_env` | Standalone headless run of the full pipeline on `scenario.json`, four times -- no disturbance, wave only, current only, and current+wave -- at accelerated speed. Produces a 4-path comparison plot under `~/nmpc_sim_logs/test_closed_loop_env_results/`. |
+| `nmpc_sim_nodes` | `test_ukf` | Standalone unit-level true-vs-estimated comparison for `ukf.ukf_core.UnscentedKalmanFilter` (state + estimated current) driving a constant-rudder turning circle maneuver; verifies covariance tuning and current tracking against a null baseline. Produces plots and RMSE summaries under `~/nmpc_sim_logs/test_ukf_results/`. |
+| `nmpc_sim_nodes` | `tune_ukf` | Automated NEES-consistency Q/R search for the UKF (Nelder-Mead over per-group scale factors). Produces suggested scaling factors for `sim_params.yaml` and a NEES plot under `~/nmpc_sim_logs/tune_ukf_results/`. |
+| `nmpc_sim_nodes` | `test_capsule_distance` | Standalone mathematical unit check for closed-form point-to-capsule/wall-segment distance (`capsule_distance_casadi`) and soft-min aggregation (`softmin_casadi`) used for wall and circular obstacle constraints in `nmpc_acados.py`. |
+| `nmpc_sim_nodes` | `test_ellipse_distance` | Standalone mathematical unit check and brute-force numerical sweeps for gradient-normalized point-to-ellipse clearance (`ellipse_distance_casadi`), verifying safety-critical non-overestimation of clearance. |
+| `nmpc_sim_nodes` | `test_moving_obstacle_prediction` | Standalone unit check for moving obstacle constant-velocity prediction over horizon $N$ (`predict_moving_obstacle_positions`) and growing safety radius expansion (`growing_radius`). |
+| `scenario_maker` | `scenario_editor` | Standalone interactive GUI for authoring custom start/waypoints/goal, circular obstacles, wall capsules, ellipses, velocity assignments, and moving obstacle ship configurations, saved as `scenario.json`. |
+| `mmg_model_validation` | `validate_casadi` | Cross-validates NumPy vs CasADi vs acados MMG dynamics on the project's standard 200s turning-circle maneuver. |
+
+### Consolidated / Retired Historical Nodes
+
+Several earlier standalone nodes from earlier iterations were retired or consolidated:
+- **`sensor_node`** (formerly in `nmpc_sim_nodes`): Originally implemented the sensor noise model as a standalone node communicating via `/sensor/measure` (`MeasureState.srv`). It was consolidated directly in-process into `mmg_node` to eliminate service-call latency while preserving identical topic publications and YAML parameters.
+- **`env_node`** (formerly in `nmpc_sim_nodes`): Originally served wave/current disturbances via `/env/disturbance` (`GetEnvDisturbance.srv`). It was folded into `mmg_node` (and instanced inside `obstacle_ship_node`) to evaluate physics in-process each tick, continuing to publish `/env/current_state` and `/env/wave_state`.
+- **`viz_node` & `run_demo`** (formerly in `nmpc_sim_nodes`): Original Matplotlib live visualizer nodes that were retired when visualization was upgraded to native RViz2 (`rviz_node` + `rviz_2d_overlay_plugins`) and the standalone lightweight HUD window (`hud_node`).
 
 Every `ros2 launch <package> <file>` currently defined in `nmpc_ws/src/`:
 
 | Package | Launch file | What it launches |
 |---|---|---|
-| `nmpc_sim_nodes` | `bringup.launch.py` | The core sim graph: `map_node`, `nmpc_node`, `ukf_node`, `mmg_node`, `logger_node`, all sharing one `params_file` launch argument (defaults to `params/sim_params.yaml`). |
-| `nmpc_sim_nodes` | `rviz_hud.launch.py` | `rviz_node` + RViz2 (with this package's `rviz/sim_view.rviz` config) + `hud_node`, together -- the normal way to get both the 3D/2D RViz view (with its `SHIP STATUS`/`CURRENT`/`WAVE` overlays and current arrows) and the standalone control-horizon companion window in one command, instead of `ros2 run`-ing `rviz_node` alone and missing the 2nd window. Clears `GTK_PATH` itself (see `unset GTK_PATH` note below) so it works regardless of which terminal launches it. |
+| `nmpc_sim_nodes` | `bringup.launch.py` | The core sim graph: `map_node`, `nmpc_node`, `ukf_node`, `mmg_node`, `logger_node`, and `obstacle_ship_node` (safely idles if no obstacle ship in scenario), all sharing `params_file` (defaults to `params/sim_params.yaml`) and `scenario_file` (defaults to `params/scenario.json`). |
+| `nmpc_sim_nodes` | `rviz_hud.launch.py` | `rviz_node` + RViz2 (with `rviz/sim_view.rviz` config) + `hud_node`, together -- launches both the 3D/2D RViz view with 2D overlays and the standalone control-horizon companion window in one command. Clears `GTK_PATH` automatically. |
+| `nmpc_sim_nodes` | `current_awareness__advantage.launch.py` | Automated benchmarking run of `current_awareness__advantage`, comparing Current-Aware vs. Current-Unaware NMPC under identical sea states. |
+| `nmpc_sim_nodes` | `nmpc_ablation_runs.launch.py` | Automated multi-seed 5-case disturbance ablation study (`nmpc_ablation_runs`), accepting launch argument `num_runs` (default: 1). |
 
 ## Getting started
 
@@ -542,43 +565,64 @@ cd nmpc_ws && python3 -m colcon build --symlink-install
 source /opt/ros/jazzy/setup.bash
 source nmpc_ws/install/setup.bash
 
-# 3. Launch the simulation graph: map_node + nmpc_node + mmg_node (sensor noise +
-#    current/wave disturbance run in-process inside mmg_node)
+# 3. Launch the simulation graph: map_node + nmpc_node + ukf_node + mmg_node +
+#    logger_node + obstacle_ship_node (sensor noise + current/wave disturbance
+#    run in-process inside mmg_node and obstacle_ship_node)
 ros2 launch nmpc_sim_nodes bringup.launch.py
 
 # 4. Watch it live, in a separate terminal -- RViz2 + its HUD companion window
-# together (needs `unset GTK_PATH` first if RViz2 fails to launch from some
-# terminals -- this launch file does that itself already, so it's only
-# relevant if running rviz2 standalone):
+# together (automatically unsets GTK_PATH so RViz launches cleanly):
 ros2 launch nmpc_sim_nodes rviz_hud.launch.py
 
-# 5. Build/edit a custom scenario layout with start, waypoints, goal, and obstacles
+# 5. (Optional) Keyboard teleoperation for the obstacle ship (WASD controls):
+# Run in its own interactive terminal: a/d = rudder, w/s = propeller rps, q = quit
+ros2 run nmpc_sim_nodes obstacle_ship_teleop_node
+
+# 6. Build/edit a custom scenario layout with start, waypoints, goal, and obstacles
+# (circles, wall capsules, ellipses, velocity assignments, obstacle ships)
 ros2 run scenario_maker scenario_editor
 
-# 6. Run the NMPC validation suite (produces ~/nmpc_sim_logs/test_nmpc_results/*.png)
+# 7. Run the NMPC validation suite (produces ~/nmpc_sim_logs/test_nmpc_results/*.png)
 ros2 run nmpc_sim_nodes test_nmpc
 
-# 7. Cross-validate NumPy vs CasADi vs acados MMG dynamics standalone
+# 8. Cross-validate NumPy vs CasADi vs acados MMG dynamics standalone
 ros2 run mmg_model_validation validate_casadi
 
-# 8. Compare true vs sensor-noise-corrupted signals standalone (no other node needed;
+# 9. Compare true vs sensor-noise-corrupted signals standalone (no other node needed;
 #    produces plots/CSVs under ~/nmpc_sim_logs/test_sensor_model_results/)
 ros2 run nmpc_sim_nodes test_sensor_model
 
-# 9. Run the full closed-loop pipeline headlessly, twice (no noise vs light noise),
-#    at accelerated (non-real-time) speed; saves a final path-comparison plot under
-#    ~/nmpc_sim_logs/test_closed_loop_noise_results/
+# 10. Run the full closed-loop pipeline headlessly, twice (no noise vs light noise),
+#     at accelerated (non-real-time) speed; saves a final path-comparison plot under
+#     ~/nmpc_sim_logs/test_closed_loop_noise_results/
 ros2 run nmpc_sim_nodes test_closed_loop_noise
 
-# 10. Sanity-check env_model's CurrentModel/WaveModel standalone (no other node needed;
+# 11. Sanity-check env_model's CurrentModel/WaveModel standalone (no other node needed;
 #     produces plots under ~/nmpc_sim_logs/test_env_model_results/)
 ros2 run nmpc_sim_nodes test_env_model
 
-# 11. Run the full closed-loop pipeline headlessly, four times (no disturbance,
+# 12. Run the full closed-loop pipeline headlessly, four times (no disturbance,
 #     wave only, current only, current+wave), at accelerated (non-real-time)
 #     speed; saves a final 4-path comparison plot under
 #     ~/nmpc_sim_logs/test_closed_loop_env_results/
 ros2 run nmpc_sim_nodes test_closed_loop_env
+
+# 13. Run the standalone obstacle geometry and prediction unit checks:
+ros2 run nmpc_sim_nodes test_capsule_distance
+ros2 run nmpc_sim_nodes test_ellipse_distance
+ros2 run nmpc_sim_nodes test_moving_obstacle_prediction
+
+# 14. Run the multi-seed 5-case disturbance ablation study:
+# Runs automated repetitions across random seeds, generates ablation_table.txt,
+# ablation_paths.png, and ablation_animation.gif:
+ros2 run nmpc_sim_nodes nmpc_ablation_runs --num-runs 5
+# or via launch: ros2 launch nmpc_sim_nodes nmpc_ablation_runs.launch.py num_runs:=5
+
+# 15. Benchmark Current-Aware vs. Current-Unaware NMPC advantage:
+# Runs automated comparison, generates current_awareness_paths.png,
+# current_awareness_animation.gif, and crab angle comparison plots:
+ros2 run nmpc_sim_nodes current_awareness__advantage
+# or via launch: ros2 launch nmpc_sim_nodes current_awareness__advantage.launch.py
 ```
 
 `ACADOS_SOURCE_DIR` is currently hardcoded to `/home/chandran/acados` in a
@@ -594,10 +638,20 @@ different machine.
 - Path-following NMPC (both solvers) tracking straight lines, offset
   starts, and multi-waypoint turns, with a distance-scaled braking ramp for
   arrival behavior.
-- Live visualization + CSV telemetry logging for any scenario.
-- Obstacle avoidance exercised end-to-end against the scenario's obstacles
-  (not just an empty list), via `test_closed_loop_noise`'s headless full-pipeline
-  rollout.
+- Obstacle avoidance exercised end-to-end: Unified soft-min distance constraint
+  formulation in `nmpc_acados.py` covering circles, wall capsules (line segments
+  with radius padding), and gradient-normalized ellipses.
+- Moving obstacles and dynamic obstacle ship: Constant-velocity obstacle
+  position extrapolation over the prediction horizon, plus `obstacle_ship_node`
+  (a full-physics 3-DOF MMG vessel experiencing identical environmental
+  disturbances, teleoperated via `obstacle_ship_teleop_node`).
+- Disturbance ablation and benchmarking framework: `nmpc_ablation_runs`
+  conducting automated multi-seed Monte Carlo evaluations across 5 disturbance
+  cases (calm water, current, wave, sensor noise, combined), generating
+  comparative performance tables and looping GIF animations.
+- Current-awareness validation: `current_awareness__advantage` isolating and
+  demonstrating the stability and tracking benefits of feeding real-time
+  ocean current estimates into the NMPC OCP prediction model.
 - A toggleable sensor noise model (`mmg_node`/`sensor_model`), run in-process
   by `mmg_node` between the true plant state and what `ukf_node` estimates
   from — GPS/compass/gyro/IMU-accelerometer/actuator noise (no direct

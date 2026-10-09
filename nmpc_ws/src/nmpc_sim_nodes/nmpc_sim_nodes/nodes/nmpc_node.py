@@ -29,8 +29,8 @@ _pkg_paths.ensure_on_path()
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
 
 from nmpc_interfaces.msg import (  # noqa: E402
-    ActiveReference, ControlCommand, ControllerEffortSample, EllipseArray, ObstacleArray, PredictionHorizon,
-    SegmentArray, SolverStatus, WallObstacleArray,
+    ActiveReference, ControlCommand, ControllerEffortSample, EllipseArray, ObstacleArray,
+    PredictedPathArray, PredictionHorizon, SegmentArray, SolverStatus, WallObstacleArray,
 )
 from nmpc_interfaces.srv import SolveNMPC  # noqa: E402
 
@@ -103,10 +103,10 @@ class NmpcNode(Node):
         self.get_logger().info('NMPC solver ready')
 
         self._active_reference = None   # nmpc_interfaces.msg.ActiveReference, cached
-        self._obstacles_cache = []      # list of (x, y, radius) tuples, cached
-        self._walls_cache = []          # list of (x0, y0, x1, y1, radius) tuples, cached -- see
-        # research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md
-        self._ellipses_cache = []       # list of (xc, yc, a, b, theta) tuples, cached -- same design doc
+        self._obstacles_cache = {}      # dict of id -> (x, y, radius)
+        self._walls_cache = {}          # dict of id -> (x0, y0, x1, y1, radius)
+        self._ellipses_cache = {}       # dict of id -> (xc, yc, a, b, theta)
+        self._predicted_paths_cache = {} # dict of id -> PredictedPath
         self._segments_cache = []       # list of (chi_p, end_x, end_y) tuples, cached -- see
         # map_node's SegmentQueue; unlike _obstacles_cache this is expected to change every
         # tick (segments popped as waypoints are reached), not just populate once at startup.
@@ -133,6 +133,7 @@ class NmpcNode(Node):
         self.create_subscription(ObstacleArray, '/map/obstacles', self._on_obstacles, _OBSTACLES_QOS)
         self.create_subscription(WallObstacleArray, '/map/walls', self._on_walls, _OBSTACLES_QOS)
         self.create_subscription(EllipseArray, '/map/ellipses', self._on_ellipses, _OBSTACLES_QOS)
+        self.create_subscription(PredictedPathArray, '/map/predicted_paths', self._on_predicted_paths, _REFERENCE_QOS)
         self.create_subscription(SegmentArray, '/map/active_segments', self._on_active_segments, _REFERENCE_QOS)
 
         # Own callback group + MultiThreadedExecutor so /map/active_reference
@@ -174,16 +175,60 @@ class NmpcNode(Node):
         self._active_reference = msg
 
     def _on_obstacles(self, msg: ObstacleArray):
-        self._obstacles_cache = [(o.x, o.y, o.radius) for o in msg.obstacles]
+        self._obstacles_cache = {o.id: (o.x, o.y, o.radius) for o in msg.obstacles}
 
     def _on_walls(self, msg: WallObstacleArray):
-        self._walls_cache = [(w.x0, w.y0, w.x1, w.y1, w.radius) for w in msg.walls]
+        self._walls_cache = {w.id: (w.x0, w.y0, w.x1, w.y1, w.radius) for w in msg.walls}
 
     def _on_ellipses(self, msg: EllipseArray):
-        self._ellipses_cache = [(e.x, e.y, e.a, e.b, e.theta) for e in msg.ellipses]
+        self._ellipses_cache = {e.id: (e.x, e.y, e.a, e.b, e.theta) for e in msg.ellipses}
+
+    def _on_predicted_paths(self, msg: PredictedPathArray):
+        for p in msg.paths:
+            self._predicted_paths_cache[p.id] = p
 
     def _on_active_segments(self, msg: SegmentArray):
         self._segments_cache = [(s.chi_p, s.end_x, s.end_y) for s in msg.segments]
+
+    def _build_per_stage_obstacles(self):
+        """Assembles obstacles, walls, and ellipses for the solver.
+        If no moving obstacles are active in _predicted_paths_cache, returns
+        static lists. If any moving obstacles are present, returns length-(N+1)
+        per-stage lists matching self.config.N."""
+        if not self._predicted_paths_cache:
+            return (
+                list(self._obstacles_cache.values()),
+                list(self._walls_cache.values()),
+                list(self._ellipses_cache.values()),
+            )
+
+        N = self.config.N
+        obs_traj = []
+        walls_traj = []
+        ellipses_traj = []
+
+        for k in range(N + 1):
+            obs_k = dict(self._obstacles_cache)
+            walls_k = dict(self._walls_cache)
+            ell_k = dict(self._ellipses_cache)
+
+            for pid, path in self._predicted_paths_cache.items():
+                xk = path.x[k] if k < len(path.x) else (path.x[-1] if len(path.x) > 0 else 0.0)
+                yk = path.y[k] if k < len(path.y) else (path.y[-1] if len(path.y) > 0 else 0.0)
+                a = float(path.a) if path.a > 0.0 else 1.0
+                b = float(path.b) if path.b > 0.0 else 1.0
+                psik = path.psi[k] if (k < len(path.psi) and len(path.psi) > 0) else 0.0
+
+                if pid.startswith('obstacle_ship') or pid.startswith('ellipse'):
+                    ell_k[pid] = (xk, yk, a, b, psik)
+                elif pid.startswith('obs'):
+                    obs_k[pid] = (xk, yk, a)
+
+            obs_traj.append(list(obs_k.values()))
+            walls_traj.append(list(walls_k.values()))
+            ellipses_traj.append(list(ell_k.values()))
+
+        return obs_traj, walls_traj, ellipses_traj
 
     def _pack_horizon(self, result, stamp) -> PredictionHorizon:
         xi_traj = result['xi_traj']  # (STATE_DIM, N+1)
@@ -242,9 +287,10 @@ class NmpcNode(Node):
             self.get_logger().warn('no /map/active_reference received yet, holding current pose', throttle_duration_sec=2.0)
             segments = [(state.psi, state.x, state.y)]
 
+        obs_in, walls_in, ell_in = self._build_per_stage_obstacles()
         result = self.solver.solve(mmg_state, delta, n, segments,
-                                    obstacles=self._obstacles_cache, walls=self._walls_cache,
-                                    ellipses=self._ellipses_cache, current=current)
+                                    obstacles=obs_in, walls=walls_in,
+                                    ellipses=ell_in, current=current)
 
         # Raw controller-effort sample: cheap numpy slicing only (arrays already
         # exist in `result`), then a non-blocking hand-off -- no metric arithmetic,
@@ -303,7 +349,8 @@ def main(args=None):
         node._effort_stop.set()
         node._effort_thread.join(timeout=2.0)
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

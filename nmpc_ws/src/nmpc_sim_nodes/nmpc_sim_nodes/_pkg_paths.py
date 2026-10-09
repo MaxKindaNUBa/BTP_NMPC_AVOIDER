@@ -27,12 +27,33 @@ ACADOS_JSON_FILE_DEFAULT = os.path.expanduser("~/.ros/nmpc_sim_nodes/acados_gene
 
 def ensure_on_path():
     """Idempotent: safe to call from every node's module-level import block."""
+    import site
+
     if _PKG_DIR not in sys.path:
         sys.path.insert(0, _PKG_DIR)
     # mpc_bridge.py / visualizer.py use flat imports ("from mpc_bridge import ..."),
     # not package-relative ones, so the directory itself must be on sys.path too.
     if _MPC_VISUALIZATION_DIR not in sys.path:
         sys.path.insert(0, _MPC_VISUALIZATION_DIR)
+
+    # Ensure casadi and acados_template installed in active or default conda environment
+    # are accessible even when nodes are invoked via system python /usr/bin/python3
+    candidate_site_dirs = []
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+        candidate_site_dirs.append(os.path.join(conda_prefix, "lib", py_ver, "site-packages"))
+    candidate_site_dirs.append(os.path.expanduser("~/miniconda3/envs/312ml/lib/python3.12/site-packages"))
+    candidate_site_dirs.append(os.path.expanduser("~/miniconda3/lib/python3.12/site-packages"))
+
+    for sdir in candidate_site_dirs:
+        if os.path.isdir(sdir):
+            site.addsitedir(sdir)
+
+    os.environ.setdefault("ACADOS_SOURCE_DIR", "/home/chandran/acados")
+    acados_template_dir = os.path.expanduser("~/acados/interfaces/acados_template")
+    if os.path.isdir(acados_template_dir) and acados_template_dir not in sys.path:
+        sys.path.append(acados_template_dir)
 
 
 def repo_root() -> str:

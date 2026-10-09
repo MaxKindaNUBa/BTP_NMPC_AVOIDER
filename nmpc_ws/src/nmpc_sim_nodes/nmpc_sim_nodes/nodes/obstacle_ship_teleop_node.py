@@ -35,7 +35,7 @@ from .. import _pkg_paths
 _pkg_paths.ensure_on_path()
 
 from nmpc.params import DEFAULT_CONFIG  # noqa: E402
-from nmpc_interfaces.msg import ControlCommand  # noqa: E402
+from nmpc_interfaces.msg import ControlCommand, VesselState  # noqa: E402
 
 
 class ObstacleShipTeleopNode(Node):
@@ -46,16 +46,8 @@ class ObstacleShipTeleopNode(Node):
         self.dt = float(self.get_parameter('dt').value)
 
         self.delta = 0.0
-        # NOT 0.0 -- matches map_node's own obstacle-ship initial-state seed
-        # (N_TRIM, mirroring the ownship's own convention): idling at n=0
-        # with u=v=r=0 sits exactly on the U->0 MMG singularity documented in
-        # nmpc/README.md item 7, which showed up as violent, fast yaw
-        # oscillation once wave forcing was enabled (nothing here has the
-        # NMPC's own solver-side U_REF_MIN floor to protect against it). If
-        # this node starts before map_node's seed message arrives, its own
-        # first published command would otherwise immediately zero it back
-        # out the moment teleop comes up.
-        self.n = DEFAULT_CONFIG.N_TRIM
+        self.u = 0.0
+        self._synced_initial_speed = False
 
         self._old_term_settings = None
         if sys.stdin.isatty():
@@ -63,7 +55,7 @@ class ObstacleShipTeleopNode(Node):
             tty.setcbreak(sys.stdin.fileno())
             # cbreak only turns off line-buffering -- ECHO stays on by default, so
             # every keystroke would otherwise print itself and mangle the live
-            # rudder/rps readout below. Turn it off explicitly (restored in
+            # rudder/speed readout below. Turn it off explicitly (restored in
             # destroy_node() along with everything else via the saved settings).
             attrs = termios.tcgetattr(sys.stdin)
             attrs[3] &= ~termios.ECHO
@@ -73,11 +65,20 @@ class ObstacleShipTeleopNode(Node):
                                     'run this node in an interactive terminal with `ros2 run`')
 
         self.cmd_pub = self.create_publisher(ControlCommand, '/obstacle_ship/cmd', 10)
+        self._obstacle_ship_active = False
+        self.create_subscription(VesselState, '/obstacle_ship/state', self._on_ship_state, 10)
         self.timer = self.create_timer(self.dt, self._tick)
 
         self.get_logger().info(
-            'obstacle_ship_teleop_node up -- a/d: rudder, w/s: propeller, q: quit '
+            'obstacle_ship_teleop_node up -- a/d: rudder, w/s: speed (m/s), q: quit '
             '(no key = hold last value, no auto-centering)')
+
+    def _on_ship_state(self, msg: VesselState):
+        self._obstacle_ship_active = True
+        if not self._synced_initial_speed:
+            self.u = float(msg.u)
+            self.delta = float(msg.delta)
+            self._synced_initial_speed = True
 
     # ------------------------------------------------------------------
     def _read_keys(self) -> set:
@@ -91,6 +92,9 @@ class ObstacleShipTeleopNode(Node):
     def _tick(self):
         keys = self._read_keys()
         cfg = DEFAULT_CONFIG
+        SPEED_RATE = 1.0  # m/s^2 change rate when w/s is held
+        SPEED_MAX = 5.0   # m/s
+        SPEED_MIN = 0.0   # m/s
 
         if 'q' in keys:
             sys.stdout.write('\n')
@@ -104,26 +108,24 @@ class ObstacleShipTeleopNode(Node):
         if 'd' in keys:
             self.delta = min(self.delta + cfg.DELTA_DOT_MAX * self.dt, cfg.DELTA_MAX)
         if 'w' in keys:
-            self.n = min(self.n + cfg.RPS_DOT_MAX * self.dt, cfg.RPS_MAX)
+            self.u = min(self.u + SPEED_RATE * self.dt, SPEED_MAX)
         if 's' in keys:
-            self.n = max(self.n - cfg.RPS_DOT_MAX * self.dt, cfg.RPS_MIN)
-        # no key held -> delta/n simply unchanged (hold-last-value control feel)
+            self.u = max(self.u - SPEED_RATE * self.dt, SPEED_MIN)
+        # no key held -> delta/u simply unchanged (hold-last-value control feel)
 
         msg = ControlCommand()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
         msg.delta = float(self.delta)
-        msg.n = float(self.n)
+        msg.n = float(self.u)
         self.cmd_pub.publish(msg)
 
-        # Live single-line readout, overwritten in place each tick (\r, no
-        # newline) -- this is what's actually being commanded on
-        # /obstacle_ship/cmd right now, for sanity-checking "control feels off"
-        # against the printed numbers rather than guessing from feel alone.
+        # Live single-line readout, overwritten in place each tick (\r, no newline)
         keys_label = ''.join(sorted(k for k in keys if k in ('a', 'd', 'w', 's'))) or '-'
+        status_label = "ACTIVE" if self._obstacle_ship_active else "WAITING FOR MOVING OBSTACLE..."
         sys.stdout.write(
             f"\rrudder: {math.degrees(self.delta):+6.1f} deg (lim ±{math.degrees(cfg.DELTA_MAX):.0f})  "
-            f"rps: {self.n:+6.2f} (lim ±{cfg.RPS_MAX:.1f})  keys: {keys_label:4s}")
+            f"speed: {self.u:5.2f} m/s (lim [0.0, {SPEED_MAX:.1f}])  keys: {keys_label:4s}  [{status_label}]")
         sys.stdout.flush()
 
     def destroy_node(self):

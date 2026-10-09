@@ -136,6 +136,22 @@ class MapNode(Node):
                 f'{len(enabled_ships)} obstacle ships enabled but only one is driveable by one '
                 'keyboard/controller node right now -- using the first enabled entry, ignoring the rest.')
         self._active_ship = enabled_ships[0] if enabled_ships else None
+        self._active_ship_ellipse_idx = None
+        self._active_ship_initial_speed = 0.0
+        if self._active_ship is None:
+            # When no separate obstacle ship is in the scenario, any moving ellipse is automatically
+            # a moving obstacle that can be teleoperated via obstacle_ship_teleop_node!
+            for i, (xc, yc, a, b, theta, vx, vy) in enumerate(self.scenario_ellipses):
+                if np.hypot(vx, vy) > _VELOCITY_EPS:
+                    psi0 = float(np.arctan2(vy, vx))
+                    self._active_ship = (xc, yc, a, b, psi0, 1)
+                    self._active_ship_ellipse_idx = i
+                    self._active_ship_initial_speed = float(np.hypot(vx, vy))
+                    self.scenario_ellipses[i][4] = psi0
+                    self.get_logger().info(
+                        f'Bound moving ellipse #{i} (pos=({xc:.1f}, {yc:.1f}), vel=({vx:.2f}, {vy:.2f}), heading={psi0:.3f} rad) '
+                        'as the driveable moving obstacle ship.')
+                    break
         self._obstacle_ship_state = None  # latest /obstacle_ship/state VesselState, or None
 
         self.last_idx = len(self.waypoints) - 1
@@ -252,10 +268,12 @@ class MapNode(Node):
         msg = VesselState()
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'map'
-        msg.u = msg.v = msg.r = 0.0
+        u0 = getattr(self, '_active_ship_initial_speed', 0.0)
+        msg.u = float(u0) if u0 > 0.0 else 0.0
+        msg.v = msg.r = 0.0
         msg.x, msg.y, msg.psi = float(xc), float(yc), float(psi0)
         msg.delta = 0.0
-        msg.n = float(DEFAULT_CONFIG.N_TRIM)
+        msg.n = float(u0)
         self.obstacle_ship_initial_state_pub.publish(msg)
 
     def _publish_predicted_paths(self, t: float):
@@ -277,30 +295,58 @@ class MapNode(Node):
             if np.hypot(vx, vy) <= _VELOCITY_EPS:
                 continue
             xy = predict_moving_obstacle_positions(x0 + t * vx, y0 + t * vy, vx, vy, DEFAULT_CONFIG.dt, DEFAULT_CONFIG.N)
-            paths.append(PredictedPath(id=f'obs_{i}', x=xy[:, 0].tolist(), y=xy[:, 1].tolist()))
+            paths.append(PredictedPath(id=f'obs_{i}', x=xy[:, 0].tolist(), y=xy[:, 1].tolist(),
+                                        a=float(_r), b=float(_r)))
         for i, (wx0, wy0, wx1, wy1, _r, vx, vy) in enumerate(self.scenario_walls):
             if np.hypot(vx, vy) <= _VELOCITY_EPS:
                 continue
             mx0, my0 = (wx0 + wx1) / 2.0, (wy0 + wy1) / 2.0
             xy = predict_moving_obstacle_positions(mx0 + t * vx, my0 + t * vy, vx, vy, DEFAULT_CONFIG.dt, DEFAULT_CONFIG.N)
-            paths.append(PredictedPath(id=f'wall_{i}', x=xy[:, 0].tolist(), y=xy[:, 1].tolist()))
+            paths.append(PredictedPath(id=f'wall_{i}', x=xy[:, 0].tolist(), y=xy[:, 1].tolist(),
+                                        a=float(_r), b=float(_r)))
         for i, (xc, yc, _a, _b, _theta, vx, vy) in enumerate(self.scenario_ellipses):
             if np.hypot(vx, vy) <= _VELOCITY_EPS:
                 continue
+            # If this moving ellipse is actively simulated by obstacle_ship_node,
+            # its live path is published below from live state
+            if getattr(self, '_active_ship_ellipse_idx', None) == i:
+                continue
             xy = predict_moving_obstacle_positions(xc + t * vx, yc + t * vy, vx, vy, DEFAULT_CONFIG.dt, DEFAULT_CONFIG.N)
-            paths.append(PredictedPath(id=f'ellipse_{i}', x=xy[:, 0].tolist(), y=xy[:, 1].tolist()))
+            paths.append(PredictedPath(id=f'ellipse_{i}', x=xy[:, 0].tolist(), y=xy[:, 1].tolist(),
+                                        psi=[float(_theta)] * (DEFAULT_CONFIG.N + 1),
+                                        a=float(_a), b=float(_b)))
         if self._obstacle_ship_state is not None:
-            # k=0 is the live/ground-truth pose from obstacle_ship_node's own MMG
-            # simulation; k=1..N is a FROZEN-RUDDER Nomoto rollout (see
-            # nmpc/nomoto_obstacle.py) -- "assume it keeps doing what it's doing
-            # right now," since nothing here knows the ship's actual future
-            # control intent (keyboard-driven or, later, a real tracked vessel).
+            # k=0 is the live/ground-truth pose from obstacle_ship_node;
+            # k=1..N is a FROZEN-RUDDER Nomoto rollout (see nmpc/nomoto_obstacle.py)
             s = self._obstacle_ship_state
             xyp = rollout_frozen_rudder(s.x, s.y, s.psi, s.u, s.r, s.delta,
                                          self._ship_nomoto_k, self._ship_nomoto_t,
                                          DEFAULT_CONFIG.dt, DEFAULT_CONFIG.N)
+            _a = float(self._active_ship[2]) if self._active_ship else 1.0
+            _b = float(self._active_ship[3]) if self._active_ship else 1.0
             paths.append(PredictedPath(id='obstacle_ship_0', x=xyp[:, 0].tolist(), y=xyp[:, 1].tolist(),
-                                        psi=xyp[:, 2].tolist()))
+                                        psi=xyp[:, 2].tolist(), a=_a, b=_b))
+            if getattr(self, '_active_ship_ellipse_idx', None) is not None:
+                paths.append(PredictedPath(id=f'ellipse_{self._active_ship_ellipse_idx}',
+                                            x=xyp[:, 0].tolist(), y=xyp[:, 1].tolist(),
+                                            psi=xyp[:, 2].tolist(), a=_a, b=_b))
+        elif self._active_ship is not None:
+            xc, yc, _a, _b, psi0, _ = self._active_ship
+            u0 = getattr(self, '_active_ship_initial_speed', 0.0)
+            xyp = rollout_frozen_rudder(float(xc), float(yc), float(psi0), float(u0), 0.0, 0.0,
+                                         self._ship_nomoto_k, self._ship_nomoto_t,
+                                         DEFAULT_CONFIG.dt, DEFAULT_CONFIG.N)
+            paths.append(PredictedPath(id='obstacle_ship_0',
+                                        x=xyp[:, 0].tolist(),
+                                        y=xyp[:, 1].tolist(),
+                                        psi=xyp[:, 2].tolist(),
+                                        a=float(_a), b=float(_b)))
+            if getattr(self, '_active_ship_ellipse_idx', None) is not None:
+                paths.append(PredictedPath(id=f'ellipse_{self._active_ship_ellipse_idx}',
+                                            x=xyp[:, 0].tolist(),
+                                            y=xyp[:, 1].tolist(),
+                                            psi=xyp[:, 2].tolist(),
+                                            a=float(_a), b=float(_b)))
         msg.paths = paths
         self.predicted_paths_pub.publish(msg)
 
@@ -426,7 +472,8 @@ def main(args=None):
         rclpy.spin(node)
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

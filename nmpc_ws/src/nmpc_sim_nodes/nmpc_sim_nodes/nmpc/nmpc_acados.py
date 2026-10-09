@@ -226,6 +226,19 @@ def _block_diag(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return out
 
 
+def _is_stage_varying(items, N: int) -> bool:
+    """True if items is a per-stage container of length N+1 whose elements are
+    per-stage lists of obstacle tuples, rather than a single static list."""
+    if items is None or len(items) != N + 1:
+        return False
+    if len(items) == 0:
+        return False
+    first = items[0]
+    if isinstance(first, (list, tuple)):
+        return len(first) == 0 or isinstance(first[0], (list, tuple, np.ndarray))
+    return False
+
+
 class AcadosNMPC:
     def __init__(self, config=DEFAULT_CONFIG):
         self.config = config
@@ -262,11 +275,11 @@ class AcadosNMPC:
         """segments: ordered list of active path segments [(chi_p, end_x, end_y), ...]
         -- typically SegmentQueue(...).segments -- previewed into the horizon by
         build_horizon_references(), which may reference several upcoming segments
-        across the N=200 stages, not just one (see nmpc/README.md item 8).
-        walls: list of (x0, y0, x1, y1, radius) capsule obstacles, e.g. harbor
-        walls/quays -- see research_papers/NON_CIRCULAR_OBSTACLE_PRIMITIVES.md.
-        ellipses: list of (xc, yc, a, b, theta) elliptical obstacles, e.g. other
-        vessels -- theta in radians, world frame; see the same design doc."""
+        across the horizon stages, not just one (see nmpc/README.md item 8).
+        obstacles: static list of (x, y, radius) tuples, OR length-(N+1) sequence of per-stage lists.
+        walls: static list of (x0, y0, x1, y1, radius) tuples, OR length-(N+1) sequence of per-stage lists.
+        ellipses: static list of (xc, yc, a, b, theta) tuples, OR length-(N+1) sequence of per-stage lists
+        (e.g. moving vessels with live predicted positions and orientations across the horizon)."""
         cfg = self.config
         if obstacles is None:
             obstacles = []
@@ -275,9 +288,16 @@ class AcadosNMPC:
         if ellipses is None:
             ellipses = []
 
-        obs_flat = pad_obstacles(obstacles, self.n_obs)
-        wall_flat = pad_walls(walls, self.n_walls)
-        ellipse_flat = pad_ellipses(ellipses, self.n_ellipses)
+        obs_varying = _is_stage_varying(obstacles, self.N)
+        wall_varying = _is_stage_varying(walls, self.N)
+        ell_varying = _is_stage_varying(ellipses, self.N)
+
+        if not obs_varying:
+            obs_flat = pad_obstacles(obstacles, self.n_obs)
+        if not wall_varying:
+            wall_flat = pad_walls(walls, self.n_walls)
+        if not ell_varying:
+            ellipse_flat = pad_ellipses(ellipses, self.n_ellipses)
 
         # speed_est: coarse forward-walk speed used only to decide which segment
         # each stage's predicted arclength position falls into -- recomputed fresh
@@ -310,16 +330,22 @@ class AcadosNMPC:
             if k == 0:
                 xi_ref = xi_ref_k
             yref_k = np.concatenate([_yref_wrap_psi(xi_ref_k), np.zeros(CONTROL_DIM)])
-            params_k = np.concatenate([[chi_p_arr[k], x_d_arr[k], y_d_arr[k]], current, obs_flat, wall_flat,
-                                        ellipse_flat])
+            obs_flat_k = pad_obstacles(obstacles[k], self.n_obs) if obs_varying else obs_flat
+            wall_flat_k = pad_walls(walls[k], self.n_walls) if wall_varying else wall_flat
+            ellipse_flat_k = pad_ellipses(ellipses[k], self.n_ellipses) if ell_varying else ellipse_flat
+            params_k = np.concatenate([[chi_p_arr[k], x_d_arr[k], y_d_arr[k]], current, obs_flat_k, wall_flat_k,
+                                        ellipse_flat_k])
             self.solver.set(k, "yref", yref_k)
             self.solver.set(k, "p", params_k)
             self.solver.cost_set(k, "W", self._W_boosted if passage_mask[k] else self._W_default)
 
         xi_ref_N = get_reference_state(chi_p_arr[self.N], x_d_arr[self.N], y_d_arr[self.N], u_ref_arr[self.N],
                                         cfg.DELTA_TRIM, cfg.N_TRIM, cfg)
-        params_N = np.concatenate([[chi_p_arr[self.N], x_d_arr[self.N], y_d_arr[self.N]], current, obs_flat,
-                                    wall_flat, ellipse_flat])
+        obs_flat_N = pad_obstacles(obstacles[self.N], self.n_obs) if obs_varying else obs_flat
+        wall_flat_N = pad_walls(walls[self.N], self.n_walls) if wall_varying else wall_flat
+        ellipse_flat_N = pad_ellipses(ellipses[self.N], self.n_ellipses) if ell_varying else ellipse_flat
+        params_N = np.concatenate([[chi_p_arr[self.N], x_d_arr[self.N], y_d_arr[self.N]], current, obs_flat_N,
+                                    wall_flat_N, ellipse_flat_N])
         self.solver.set(self.N, "yref", _yref_wrap_psi(xi_ref_N))
         self.solver.set(self.N, "p", params_N)
         self.solver.cost_set(self.N, "W", self._We_boosted if passage_mask[self.N] else self._We_default)

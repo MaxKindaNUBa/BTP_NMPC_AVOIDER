@@ -61,7 +61,7 @@ from matplotlib.patches import Circle, Ellipse, Polygon
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
-MODES = ["Start", "Waypoint", "Goal", "Obstacle", "Wall", "Ellipse", "Velocity", "ObstacleShip", "Remove"]
+MODES = ["Start", "Waypoint", "Goal", "Obstacle", "Wall", "Ellipse", "Velocity", "Remove"]
 
 
 def _find_default_scenario_path() -> str:
@@ -171,13 +171,7 @@ class ScenarioEditor:
         # vx/vy (earth-frame m/s, default 0.0 = stationary) on all three: set via Velocity mode
         # (select, then Speed/Heading boxes + Apply Velocity), independent of the placement
         # gesture -- see module docstring and research_papers/COLREGS_AWARE_NMPC_MOVING_OBSTACLES.md.
-        self.obstacle_ships = []  # [xc, yc, a, b, psi0, enabled] -- an ellipse-shaped, keyboard/
-        # hardware-driven "obstacle ship": placed/oriented exactly like Ellipse mode (drag
-        # direction -> psi0, drag length -> a, b from ellipseb_box), but NEVER given vx/vy --
-        # its live motion comes from obstacle_ship_node's own MMG simulation, not scenario-
-        # authored velocity. `enabled` (0.0/1.0) gates whether map_node spawns it for a run;
-        # see this feature's plan / nmpc/README.md's "Planned: Nomoto-driven moving obstacles".
-
+        self.obstacle_ships = []  # legacy compatibility placeholder
         self.mode = "start"
         self._history = []       # stack of no-arg undo callables
         self._obs_drag_start = None
@@ -186,10 +180,7 @@ class ScenarioEditor:
         self._wall_preview = None
         self._ell_drag_start = None
         self._ell_preview = None
-        self._ship_drag_start = None
-        self._ship_preview = None
         self._selected = None    # (kind, idx) for Velocity mode -- kind in {"obstacle","wall","ellipse"}
-        self._selected_ship = None  # index into self.obstacle_ships, for ObstacleShip mode's Toggle Enabled
         self._dynamic_artists = []
 
         self._build_figure(xlim, ylim)
@@ -223,7 +214,6 @@ class ScenarioEditor:
             Patch(facecolor="firebrick", alpha=0.35, edgecolor="darkred", label="Wall"),
             Patch(facecolor="mediumpurple", alpha=0.3, edgecolor="indigo", label="Ellipse"),
             Line2D([0], [0], color="darkorange", lw=2, label="Velocity (any obstacle)"),
-            Patch(facecolor="steelblue", alpha=0.4, edgecolor="navy", label="Obstacle Ship"),
         ]
         self.ax_map.legend(handles=legend_handles, loc="upper right", fontsize=8)
 
@@ -236,13 +226,12 @@ class ScenarioEditor:
 
         # ---- sidebar widgets ----
         self.fig.text(0.71, 0.97, "Mode", fontsize=10, fontweight="bold")
-        ax_mode = self.fig.add_axes([0.70, 0.75, 0.27, 0.19])
+        ax_mode = self.fig.add_axes([0.70, 0.76, 0.27, 0.18])
         ax_mode.set_frame_on(True)
         self.radio_mode = RadioButtons(ax_mode, MODES, active=0)
         self.radio_mode.on_clicked(self._on_mode_change)
 
-        # Compact label+textbox rows (row_step=0.052, tighter than the original 0.07 to fit
-        # the two new Velocity fields below without the sidebar overflowing the figure).
+        # Compact label+textbox rows
         self.simtime_box = self._add_field(0.735, "Sim Time (s)", self.sim_time, self._on_simtime_submit)
         self.uinit_box = self._add_field(0.683, "Initial Surge u (m/s)", self.u_init, self._on_uinit_submit)
         self.psiinit_box = self._add_field(0.631, "Initial Heading (deg, 0=N/+90=E)", self.psi_init,
@@ -258,34 +247,27 @@ class ScenarioEditor:
         self.velspeed_box = self._add_field(0.388, "Velocity Speed (m/s)", 0.0, None, fontsize=8)
         self.velheading_box = self._add_field(0.336, "Velocity Heading (deg, 0=N/+90=E)", 0.0, None, fontsize=8)
 
-        ax_applyvel = self.fig.add_axes([0.70, 0.244, 0.27, 0.036])
+        ax_applyvel = self.fig.add_axes([0.70, 0.230, 0.27, 0.038])
         self.btn_apply_vel = Button(ax_applyvel, "Apply Velocity")
         self.btn_apply_vel.on_clicked(self._on_apply_velocity)
 
-        # ObstacleShip mode's select-then-apply flow (select nearest ship by
-        # clicking it, same convention as Velocity mode's _select_for_velocity)
-        # -- flips the selected ship's enabled flag, doesn't create/remove one.
-        ax_toggleship = self.fig.add_axes([0.70, 0.200, 0.27, 0.036])
-        self.btn_toggle_ship = Button(ax_toggleship, "Toggle Ship Enabled")
-        self.btn_toggle_ship.on_clicked(self._on_toggle_ship_enabled)
-
-        ax_save = self.fig.add_axes([0.70, 0.156, 0.27, 0.036])
+        ax_save = self.fig.add_axes([0.70, 0.178, 0.27, 0.038])
         self.btn_save = Button(ax_save, "Save scenario.json")
         self.btn_save.on_clicked(self._on_save)
 
-        ax_load = self.fig.add_axes([0.70, 0.112, 0.27, 0.036])
+        ax_load = self.fig.add_axes([0.70, 0.126, 0.27, 0.038])
         self.btn_load = Button(ax_load, "Load")
         self.btn_load.on_clicked(self._on_load)
 
-        ax_undo = self.fig.add_axes([0.70, 0.068, 0.27, 0.036])
+        ax_undo = self.fig.add_axes([0.70, 0.074, 0.27, 0.038])
         self.btn_undo = Button(ax_undo, "Undo")
         self.btn_undo.on_clicked(self._on_undo)
 
-        ax_clear = self.fig.add_axes([0.70, 0.024, 0.27, 0.036])
+        ax_clear = self.fig.add_axes([0.70, 0.022, 0.27, 0.038])
         self.btn_clear = Button(ax_clear, "Clear All")
         self.btn_clear.on_clicked(self._on_clear)
 
-        self.fig.text(0.70, 0.008, f"Saves to:\n{self.out_path}", fontsize=6, color="dimgray")
+        self.fig.text(0.70, 0.006, f"Saves to:\n{self.out_path}", fontsize=6, color="dimgray")
 
         self.fig.canvas.mpl_connect("button_press_event", self._on_press)
         self.fig.canvas.mpl_connect("motion_notify_event", self._on_motion)
@@ -385,21 +367,6 @@ class ScenarioEditor:
             self.fig.canvas.draw_idle()
             return
 
-        if self.mode == "obstacleship":
-            # Same press-drag-release gesture as Ellipse mode (direction ->
-            # psi0, length -> a) -- but a SHORT drag/plain click near an
-            # EXISTING obstacle ship selects it instead of placing a new
-            # default-sized one (see _on_release), so this one mode covers
-            # both "place new" and "select for Toggle Enabled" without a
-            # separate mode, mirroring Velocity mode's own select-by-click
-            # convention for the latter.
-            self._ship_drag_start = pt
-            self._ship_preview = Ellipse((pt[1], pt[0]), width=0.0, height=2.0 * self.default_ellipse_b,
-                                          angle=0.0, facecolor="steelblue", alpha=0.3,
-                                          edgecolor="navy", linestyle="--", zorder=3)
-            self.ax_map.add_patch(self._ship_preview)
-            self.fig.canvas.draw_idle()
-            return
 
         if self.mode == "wall":
             # two-click placement (not press-drag-release like obstacles): a
@@ -469,21 +436,6 @@ class ScenarioEditor:
                 self._ell_preview.angle = plot_angle_deg
                 self.fig.canvas.draw_idle()
             return
-
-        if self._ship_drag_start is not None:
-            pt = self._event_point(event)
-            if pt is not None and self._ship_preview is not None:
-                sx, sy = self._ship_drag_start
-                dx_storage, dy_storage = pt[0] - sx, pt[1] - sy
-                a = float(np.hypot(dx_storage, dy_storage))
-                theta = float(np.arctan2(dy_storage, dx_storage))
-                plot_angle_deg = float(np.degrees(np.pi / 2.0 - theta))
-                self._ship_preview.set_center((sy, sx))
-                self._ship_preview.width = 2.0 * a
-                self._ship_preview.angle = plot_angle_deg
-                self.fig.canvas.draw_idle()
-            return
-
         if self._obs_drag_start is None:
             return
         pt = self._event_point(event)
@@ -495,36 +447,6 @@ class ScenarioEditor:
         self.fig.canvas.draw_idle()
 
     def _on_release(self, event):
-        if self._ship_drag_start is not None:
-            pt = self._event_point(event)
-            sx, sy = self._ship_drag_start
-            if self._ship_preview is not None:
-                self._ship_preview.remove()
-                self._ship_preview = None
-            if pt is None:
-                self._ship_drag_start = None
-                self.fig.canvas.draw_idle()
-                return
-            dx_storage, dy_storage = pt[0] - sx, pt[1] - sy
-            a = float(np.hypot(dx_storage, dy_storage))
-            if a < 0.3:
-                # plain click, no drag -- select the nearest EXISTING ship
-                # (for Toggle Enabled) if one is close by, same tolerance
-                # convention as _select_for_velocity/_remove_nearest; only
-                # place a new default-sized one if nothing is nearby.
-                if self._select_nearest_ship(pt):
-                    self._ship_drag_start = None
-                    self._redraw()
-                    return
-                a, psi0 = self.default_obstacle_radius, 0.0
-            else:
-                psi0 = float(np.arctan2(dy_storage, dx_storage))
-            self.obstacle_ships.append([sx, sy, a, self.default_ellipse_b, psi0, 1.0])
-            self._push_undo(lambda: self.obstacle_ships.pop() if self.obstacle_ships else None)
-            self._ship_drag_start = None
-            self._redraw()
-            return
-
         if self._ell_drag_start is not None:
             pt = self._event_point(event)
             sx, sy = self._ell_drag_start
@@ -609,37 +531,6 @@ class ScenarioEditor:
         self.velheading_box.set_val(str(round(heading, 2)))
         self._flash(f"Selected {kind} #{idx} -- edit Speed/Heading, then Apply Velocity")
         self._redraw()
-
-    def _select_nearest_ship(self, pt) -> bool:
-        """ObstacleShip mode's plain-click selection: True (and sets
-        self._selected_ship) if an existing obstacle ship is within the same
-        tolerance _select_for_velocity/_remove_nearest use, else False (so
-        the caller falls back to placing a new one)."""
-        if not self.obstacle_ships:
-            return False
-        x, y = pt
-        dists = [np.hypot(xc - x, yc - y) for xc, yc, _a, _b, _psi0, _en in self.obstacle_ships]
-        idx = int(np.argmin(dists))
-        xlim = self.ax_map.get_xlim()
-        tol = abs(xlim[1] - xlim[0]) / 25.0
-        if dists[idx] > tol:
-            return False
-        self._selected_ship = idx
-        self._flash(f"Selected obstacle ship #{idx} -- click Toggle Ship Enabled to flip it")
-        return True
-
-    def _on_toggle_ship_enabled(self, event):
-        if self._selected_ship is None or self._selected_ship >= len(self.obstacle_ships):
-            self._flash("Click an obstacle ship in ObstacleShip mode first")
-            return
-        idx = self._selected_ship
-        row = self.obstacle_ships[idx]
-        old_enabled = row[5]
-        row[5] = 0.0 if old_enabled else 1.0
-        self._push_undo(lambda i=idx, v=old_enabled: self.obstacle_ships[i].__setitem__(5, v))
-        self._flash(f"Obstacle ship #{idx} enabled={bool(row[5])}")
-        self._redraw()
-
     def _remove_nearest(self, pt):
         x, y = pt
         candidates = []
@@ -658,8 +549,6 @@ class ScenarioEditor:
             # hit-testing, exactness doesn't matter here (unlike the solver's
             # gradient-normalized ellipse_distance_casadi)
             candidates.append((max(0.0, np.hypot(xc - x, yc - y) - max(a, b)), "ellipse", i))
-        for i, (xc, yc, a, b, _psi0, _en) in enumerate(self.obstacle_ships):
-            candidates.append((max(0.0, np.hypot(xc - x, yc - y) - max(a, b)), "obstacle_ship", i))
 
         if not candidates:
             self._flash("Nothing to remove")
@@ -693,13 +582,8 @@ class ScenarioEditor:
         elif kind == "ellipse":
             old = self.ellipses.pop(idx)
             self._push_undo(lambda i=idx, v=old: self.ellipses.insert(i, v))
-        elif kind == "obstacle_ship":
-            old = self.obstacle_ships.pop(idx)
-            self._push_undo(lambda i=idx, v=old: self.obstacle_ships.insert(i, v))
         if self._selected == (kind, idx):
             self._selected = None  # the selected item was just removed
-        if kind == "obstacle_ship" and self._selected_ship == idx:
-            self._selected_ship = None
         self._flash(f"Removed {kind}")
 
     # ------------------------------------------------------------------
@@ -709,7 +593,6 @@ class ScenarioEditor:
         self._deactivate_toolbar_tools()
         self.mode = label.lower()
         self._selected = None  # avoid a stale selection surviving a mode switch
-        self._selected_ship = None
         self._update_status_text()
         self._redraw()
 
@@ -791,6 +674,8 @@ class ScenarioEditor:
         row = lists[kind][idx]
         old = list(row)
         row[-2], row[-1] = float(vx), float(vy)
+        if kind == "ellipse":
+            row[4] = float(heading_rad)
         self._push_undo(lambda k=kind, i=idx, v=old: lists[k].__setitem__(i, v))
         self._flash(f"Set {kind} #{idx} velocity: speed={speed:.2f} m/s, heading={heading_deg:.1f} deg")
         self._redraw()
@@ -813,7 +698,7 @@ class ScenarioEditor:
             "obstacles": [[round(v, 4) for v in o] for o in self.obstacles],
             "walls": [[round(v, 4) for v in w] for w in self.walls],
             "ellipses": [[round(v, 4) for v in e] for e in self.ellipses],
-            "obstacle_ships": [[round(v, 4) for v in s[:5]] + [bool(s[5])] for s in self.obstacle_ships],
+            "obstacle_ships": [],
         }
         os.makedirs(os.path.dirname(os.path.abspath(self.out_path)), exist_ok=True)
         with open(self.out_path, "w") as f:
@@ -821,10 +706,8 @@ class ScenarioEditor:
         n_moving = sum(1 for o in self.obstacles if np.hypot(o[3], o[4]) > _VELOCITY_EPS) + \
             sum(1 for w in self.walls if np.hypot(w[5], w[6]) > _VELOCITY_EPS) + \
             sum(1 for e in self.ellipses if np.hypot(e[5], e[6]) > _VELOCITY_EPS)
-        n_ships_enabled = sum(1 for s in self.obstacle_ships if s[5])
         self._flash(f"Saved {len(full_path)} waypoints, {len(self.obstacles)} obstacles, "
-                    f"{len(self.walls)} walls, {len(self.ellipses)} ellipses ({n_moving} moving), "
-                    f"{len(self.obstacle_ships)} obstacle ship(s) ({n_ships_enabled} enabled) -> {self.out_path}")
+                    f"{len(self.walls)} walls, {len(self.ellipses)} ellipses ({n_moving} moving) -> {self.out_path}")
 
     def _on_load(self, event):
         if not os.path.exists(self.out_path):
@@ -844,7 +727,12 @@ class ScenarioEditor:
         self.obstacles = [_pad_row(o, 5) for o in data.get("obstacles", [])]
         self.walls = [_pad_row(w, 7) for w in data.get("walls", [])]
         self.ellipses = [_pad_row(e, 7) for e in data.get("ellipses", [])]
-        self.obstacle_ships = [_pad_row(s, 6) for s in data.get("obstacle_ships", [])]
+        # Migrate any legacy obstacle ships directly into ellipses
+        for s in data.get("obstacle_ships", []):
+            padded = _pad_row(s, 6)
+            if bool(padded[5]):
+                self.ellipses.append([padded[0], padded[1], padded[2], padded[3], padded[4], 0.0, 0.0])
+        self.obstacle_ships = []
         self.sim_time = float(data.get("sim_time", self.sim_time))
         mmg_init = data.get("mmg_init")
         if mmg_init:
@@ -856,7 +744,6 @@ class ScenarioEditor:
         self.uinit_box.set_val(str(self.u_init))
         self.psiinit_box.set_val(str(round(self.psi_init, 4)))
         self._selected = None
-        self._selected_ship = None
         self._history = []
         self._redraw()
         self._flash(f"Loaded {self.out_path}")
@@ -874,7 +761,6 @@ class ScenarioEditor:
         self.waypoints, self.obstacles, self.walls, self.ellipses = [], [], [], []
         self.obstacle_ships = []
         self._selected = None
-        self._selected_ship = None
         self._history = []
         self._redraw()
         self._flash("Cleared")
@@ -904,10 +790,7 @@ class ScenarioEditor:
             f"Obstacles: {len(self.obstacles)}\n"
             f"Walls    : {len(self.walls)}\n"
             f"Ellipses : {len(self.ellipses)}\n"
-            f"Obstacle Ships: {len(self.obstacle_ships)} "
-            f"({sum(1 for s in self.obstacle_ships if s[5])} enabled)\n"
             f"Selected : {selected_label}\n"
-            f"Selected Ship: {self._selected_ship if self._selected_ship is not None else 'none'}\n"
             f"Sim Time : {self.sim_time:.1f} s\n"
             f"u_init   : {self.u_init:.2f} m/s\n"
             f"psi_init : {self.psi_init:.1f} deg"
@@ -1022,30 +905,6 @@ class ScenarioEditor:
             t = self.ax_map.text(yc, xc, label, fontsize=7, ha="center", va="center", zorder=4)
             self._dynamic_artists.append(t)
 
-        for i, (xc, yc, a, b, psi0, enabled) in enumerate(self.obstacle_ships):
-            # Bold outline + heading arrow (psi0, same compass convention as
-            # the initial-heading arrow above), dimmed when disabled -- NEVER
-            # gets a Velocity-mode arrow (obstacle ships have no vx/vy; their
-            # motion comes from obstacle_ship_node's own MMG simulation, not
-            # scenario-authored velocity).
-            selected = self._selected_ship == i
-            alpha = 0.35 if enabled else 0.12
-            plot_angle_deg = float(np.degrees(np.pi / 2.0 - psi0))
-            e = Ellipse((yc, xc), width=2.0 * a, height=2.0 * b, angle=plot_angle_deg,
-                        facecolor="steelblue", alpha=alpha,
-                        edgecolor="yellow" if selected else "navy",
-                        linewidth=2.5 if selected else 1.5, zorder=3)
-            self.ax_map.add_patch(e)
-            self._dynamic_artists.append(e)
-            arrow_len = max(a, 1.0)
-            dx_plot, dy_plot = arrow_len * np.sin(psi0), arrow_len * np.cos(psi0)
-            arrow = self.ax_map.annotate(
-                "", xy=(yc + dx_plot, xc + dy_plot), xytext=(yc, xc),
-                arrowprops=dict(arrowstyle="->", color="navy" if enabled else "gray", lw=2), zorder=6)
-            self._dynamic_artists.append(arrow)
-            label = f"SHIP {i}\n{a:.1f}x{b:.1f}m" + ("" if enabled else "\n(disabled)")
-            t = self.ax_map.text(yc, xc, label, fontsize=7, ha="center", va="center", zorder=4)
-            self._dynamic_artists.append(t)
 
         self._update_status_text()
         self.fig.canvas.draw_idle()

@@ -376,10 +376,10 @@ class RvizNode(Node):
 
         ellipse_markers, ellipses_xyabtheta = [], []
         for e in self._ellipses_msgs:
-            x, y = self._live_xy(e.id, e.x, e.y)
-            e2 = Ellipse(id=e.id, x=x, y=y, a=e.a, b=e.b, theta=e.theta, vx=e.vx, vy=e.vy)
+            x, y, theta = self._live_xyp(e.id, e.x, e.y, e.theta)
+            e2 = Ellipse(id=e.id, x=x, y=y, a=e.a, b=e.b, theta=theta, vx=e.vx, vy=e.vy)
             ellipse_markers.append(self._build_ellipse_marker(e2))
-            ellipses_xyabtheta.append((x, y, e.a, e.b, e.theta))
+            ellipses_xyabtheta.append((x, y, e.a, e.b, theta))
         self._ellipse_markers = ellipse_markers
         self._ellipses_xyabtheta = ellipses_xyabtheta
 
@@ -631,7 +631,8 @@ def main(args=None):
         rclpy.spin(node)
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':
